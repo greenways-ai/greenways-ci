@@ -1,13 +1,22 @@
-name: Publish Web Main (Test)
+name: Publish Web Main
 
 # Controls when the workflow will run
 on:
   repository_dispatch:
-    types: [ui-changed]
+    types: [ui-changed, ui-changed-prod]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
 
 jobs:
-  publish-web-main-netlify:
+  publish-web-netlify:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +31,29 @@ jobs:
       - name: Show full commit SHA
         run: git rev-parse HEAD
 
-      # 2. Install Node and Yarn
+      # 2. Determine environment
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            if [[ "${{ github.event.action }}" == "ui-changed-prod" ]]; then
+              echo "environment=prod" >> $GITHUB_OUTPUT
+              echo "site_id=${{ secrets.NETLIFY_WEB_PROD_ID }}" >> $GITHUB_OUTPUT
+            else
+              echo "environment=staging" >> $GITHUB_OUTPUT
+              echo "site_id=${{ secrets.NETLIFY_WEB_TEST_ID }}" >> $GITHUB_OUTPUT
+            fi
+          else
+            # workflow_dispatch
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            if [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+              echo "site_id=${{ secrets.NETLIFY_WEB_PROD_ID }}" >> $GITHUB_OUTPUT
+            else
+              echo "site_id=${{ secrets.NETLIFY_WEB_TEST_ID }}" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      # 3. Install Node and Yarn
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -31,19 +62,10 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Install dependencies
-        working-directory: src-js/greenways
-        run: yarn install --frozen-lockfile
-        
-      - name: Copy .env.local for test deployment
-        working-directory: src-js/greenways/apps/gw.spaces
-        run: |
-          cp ../../../cache/dot-secrets/spaces/staging/.env .env.local 2>/dev/null || true
-
-      - name: Build and Deploy to Netlify (Test)
-        working-directory: src-js/greenways/apps/gw.spaces
+      # 4. Run deployment script
+      - name: Deploy to Netlify
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_WEB_TEST_ID }}
+          NETLIFY_SITE_ID: ${{ steps.env.outputs.site_id }}
         run: |
-          npx netlify-cli deploy --prod --build --site=$NETLIFY_SITE_ID
+          ./scripts/deploy-netlify.sh ${{ steps.env.outputs.environment }}

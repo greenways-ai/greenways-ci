@@ -6,14 +6,13 @@ CI/CD workflows for Greenways AI projects.
 
 ### Web Deployments
 
-- **web-main.yml** - Deploys the test environment to Netlify
-- **web-prod.yml** - Deploys the production environment to Netlify
+- **web-main.yml** - Deploys to Netlify (handles both staging and production)
 
 ### Triggers
 
 Workflows can be triggered via:
-- `repository_dispatch` events from the main repo
-- Manual `workflow_dispatch` triggers
+- `repository_dispatch` events from the main repo (`gw-v2`)
+- Manual `workflow_dispatch` triggers with environment selection
 
 ### Required Secrets
 
@@ -21,19 +20,29 @@ Workflows can be triggered via:
 |--------|-------------|
 | `GH_TOKEN` | GitHub Personal Access Token with repo access |
 | `NETLIFY_TOKEN` | Netlify authentication token |
-| `NETLIFY_WEB_TEST_ID` | Netlify site ID for test environment |
+| `NETLIFY_WEB_TEST_ID` | Netlify site ID for test/staging environment |
 | `NETLIFY_WEB_PROD_ID` | Netlify site ID for production environment |
 
 ## Usage
 
+### Automatic Deployment (via git push)
+
+- Push to `main` branch → Deploys to **production**
+- Push to other branches → Deploys to **staging**
+
 ### Manual Trigger
 
 ```bash
-# Deploy to test
-gh workflow run web-main.yml --repo greenways-ai/greenways-ci
+# Deploy to staging
+gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=staging
 
-# Deploy to production
-gh workflow run web-prod.yml --repo greenways-ai/greenways-ci
+# Deploy to production  
+gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=production
+
+# Or use the Makefile
+cd cache/greenways-ci
+make deploy-staging
+make deploy-prod
 ```
 
 ### Repository Dispatch (from gw-v2)
@@ -41,7 +50,7 @@ gh workflow run web-prod.yml --repo greenways-ai/greenways-ci
 To trigger deployments from the main repository:
 
 ```bash
-# Trigger test deployment
+# Trigger staging deployment
 curl -X POST \
   -H "Authorization: token $GH_TOKEN" \
   -H "Accept: application/vnd.github.v3+json" \
@@ -55,3 +64,14 @@ curl -X POST \
   https://api.github.com/repos/greenways-ai/greenways-ci/dispatches \
   -d '{"event_type":"ui-changed-prod"}'
 ```
+
+## How It Works
+
+The workflow now uses the local deployment script (`scripts/deploy-netlify.sh`) from the `gw-v2` repository:
+
+1. Checks out the `gw-v2` repo with submodules
+2. Determines the target environment (staging vs production)
+3. Runs `./scripts/deploy-netlify.sh <environment>`
+4. The script handles building and deploying to Netlify
+
+This ensures consistency between local deployments and CI deployments.

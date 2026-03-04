@@ -1,15 +1,19 @@
 # Greenways CI - Makefile
 # Provides convenient commands for triggering workflows
 
-.PHONY: deploy-test deploy-prod
+.PHONY: deploy deploy-staging deploy-prod list runs
 
-# Deploy to test environment (Vercel + Netlify)
-deploy-test:
+# Deploy to staging environment (default)
+deploy:
 	gh workflow run web-main.yml --repo greenways-ai/greenways-ci
 
-# Deploy to production environment (Vercel + Netlify)
+# Deploy to staging environment (explicit)
+deploy-staging:
+	gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=staging
+
+# Deploy to production environment
 deploy-prod:
-	gh workflow run web-prod.yml --repo greenways-ai/greenways-ci
+	gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=production
 
 # List available workflows
 list:
