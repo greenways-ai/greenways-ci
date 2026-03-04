@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: greenways-ai/v2
-          token: ${{ secrets.GH_TOKEN }} # Personal Access Token with repo write access
+          token: ${{ secrets.GH_TOKEN }}
           submodules: recursive
           
       - name: Show full commit SHA
@@ -28,12 +28,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Enable Corepack and Check Versions
-        run: |
-          corepack enable
-          node -v
-          yarn --version
-          ls -al
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Install dependencies
         working-directory: src-js/greenways
@@ -42,19 +38,12 @@ jobs:
       - name: Copy .env.local for test deployment
         working-directory: src-js/greenways/apps/gw.spaces
         run: |
-          # Copy staging/test environment
-          cp .env.local.example .env.local || true
-          # Or use dot-secrets if available
           cp ../../../cache/dot-secrets/spaces/staging/.env .env.local 2>/dev/null || true
 
-      - name: Build Next.js app
-        working-directory: src-js/greenways/apps/gw.spaces
-        run: yarn build
-
-      - name: Deploy to Netlify (Test)
+      - name: Build and Deploy to Netlify (Test)
         working-directory: src-js/greenways/apps/gw.spaces
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_WEB_TEST_ID }}
         run: |
-          npx netlify-cli deploy --prod --dir=.next --site=$NETLIFY_SITE_ID
+          npx netlify-cli deploy --prod --build --site=$NETLIFY_SITE_ID
