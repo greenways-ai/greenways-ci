@@ -54,5 +54,6 @@ jobs:
         working-directory: src-js/greenways/apps/gw.spaces
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_WEB_PROD_ID }}
         run: |
-          yarn netlify deploy --prod --site=${{ secrets.NETLIFY_WEB_PROD_ID }}
+          npx netlify-cli deploy --prod --dir=.next --site=$NETLIFY_SITE_ID
