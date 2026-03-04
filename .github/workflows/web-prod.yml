@@ -10,10 +10,6 @@ jobs:
   publish-web-prod-netlify:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: src-js/greenways
-
     steps:
       # 1. Check out gw-v2
       - name: Checkout gw-v2
@@ -21,8 +17,8 @@ jobs:
         with:
           repository: greenways-ai/gw-v2
           branch: main
-          # path: src-js/greenways
           token: ${{ secrets.GH_TOKEN }} # Personal Access Token with repo write access
+          submodules: recursive
           
       - name: Show full commit SHA
         run: git rev-parse HEAD
@@ -41,15 +37,22 @@ jobs:
           ls -al
 
       - name: Install dependencies
+        working-directory: src-js/greenways
         run: yarn install --frozen-lockfile
         
-      - name: Copy .env.local from apps/gw.spaces/.env
+      - name: Copy .env.local for production deployment
+        working-directory: src-js/greenways/apps/gw.spaces
         run: |
-          # Write the content of the secret into .env.local
-          cp apps/gw.spaces/.env/.env.prod apps/gw.spaces/.env.local
+          # Copy production environment
+          cp ../../../cache/dot-secrets/spaces/prod/.env .env.local 2>/dev/null || true
 
-      - name: Deploy Web Prod to Netlify
+      - name: Build Next.js app
+        working-directory: src-js/greenways/apps/gw.spaces
+        run: yarn build
+
+      - name: Deploy to Netlify (Production)
+        working-directory: src-js/greenways/apps/gw.spaces
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_WEB_PROD_ID }}
-        run: yarn netlify deploy --prod --filter @greenways/gw.spaces
+        run: |
+          yarn netlify deploy --prod --site=${{ secrets.NETLIFY_WEB_PROD_ID }}
