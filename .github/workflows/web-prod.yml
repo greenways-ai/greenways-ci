@@ -15,7 +15,7 @@ jobs:
       - name: Checkout gw-v2
         uses: actions/checkout@v4
         with:
-          repository: greenways-ai/gw-v2
+          repository: greenways-ai/v2
           branch: main
           token: ${{ secrets.GH_TOKEN }} # Personal Access Token with repo write access
           submodules: recursive
