@@ -6,8 +6,8 @@ CI/CD workflows for Greenways AI projects.
 
 ### Web Deployments
 
-- **web-main.yml** - Deploys the test environment to Vercel and Netlify
-- **web-prod.yml** - Deploys the production environment to Vercel and Netlify
+- **web-main.yml** - Deploys the test environment to Netlify
+- **web-prod.yml** - Deploys the production environment to Netlify
 
 ### Triggers
 
@@ -20,10 +20,6 @@ Workflows can be triggered via:
 | Secret | Description |
 |--------|-------------|
 | `GH_TOKEN` | GitHub Personal Access Token with repo access |
-| `VERCEL_TOKEN` | Vercel authentication token |
-| `VERCEL_ORG_ID` | Vercel organization ID |
-| `VERCEL_WEB_TEST_ID` | Vercel project ID for test environment |
-| `VERCEL_WEB_PROD_ID` | Vercel project ID for production environment |
 | `NETLIFY_TOKEN` | Netlify authentication token |
 | `NETLIFY_WEB_TEST_ID` | Netlify site ID for test environment |
 | `NETLIFY_WEB_PROD_ID` | Netlify site ID for production environment |

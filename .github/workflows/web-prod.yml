@@ -1,9 +1,5 @@
 name: Publish Web Prod
 
-env:
-  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_WEB_PROD_ID }}
-
 # Controls when the workflow will run
 on:
   repository_dispatch:
@@ -11,58 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-    
-  publish-web-prod-vercel:
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: src-js/greenways
-
-    steps:
-      # 1. Check out gw-v2
-      - name: Checkout gw-v2
-        uses: actions/checkout@v4
-        with:
-          repository: greenways-ai/gw-v2
-          branch: main
-          # path: src-js/greenways
-          token: ${{ secrets.GH_TOKEN }} # Personal Access Token with repo write access
-          
-      - name: Show full commit SHA
-        run: git rev-parse HEAD
-
-      # 2. Install Node and Yarn
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Enable Corepack and Check Versions
-        run: |
-          corepack enable
-          node -v
-          yarn --version
-          ls -al
-
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-        
-      - name: Copy .env.local from apps/gw.spaces/.env
-        run: |
-          # Write the content of the secret into .env.local
-          cp apps/gw.spaces/.env/.env.prod apps/gw.spaces/.env.local
-        
-      - name: Pull Vercel Environment
-        run: yarn workspace @greenways/gw.spaces vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        
-      - name: Build Web Prod
-        run: yarn workspace @greenways/gw.spaces vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-      
-      - name: Deploy Web Prod
-        run: yarn workspace @greenways/gw.spaces vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
-
-    
   publish-web-prod-netlify:
     runs-on: ubuntu-latest
 
