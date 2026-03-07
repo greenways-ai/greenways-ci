@@ -1,0 +1,388 @@
+# =============================================================================
+# Hunter-RAG End-to-End Testing Workflow
+# =============================================================================
+# This workflow runs comprehensive CI/CD for the Hunter-RAG (Narrative Hunter)
+# project. It is triggered via repository_dispatch from the gw-v2 repo.
+#
+# Triggers:
+#   - repository_dispatch from gw-v2 (hunter-rag-changed, hunter-rag-changed-prod)
+#   - workflow_dispatch for manual runs
+#
+# =============================================================================
+
+name: Hunter-RAG CI/CD
+
+on:
+  repository_dispatch:
+    types: [hunter-rag-changed, hunter-rag-changed-prod, hunter-rag-test]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      run-tests:
+        description: 'Run test suite'
+        required: false
+        default: true
+        type: boolean
+      run-e2e:
+        description: 'Run E2E tests'
+        required: false
+        default: false
+        type: boolean
+      deploy:
+        description: 'Deploy after tests'
+        required: false
+        default: true
+        type: boolean
+
+# Global environment variables
+env:
+  NODE_VERSION: '20'
+  COVERAGE_THRESHOLD: 80
+  HUNTER_RAG_DIR: 'src-js/hunter-rag'
+
+jobs:
+  # ===========================================================================
+  # Job 1: Setup and Code Quality
+  # ===========================================================================
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.HUNTER_RAG_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm run lint
+
+      - name: Check code formatting
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm run format:check
+        continue-on-error: true
+
+      - name: Run TypeScript type checking
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm run typecheck
+
+  # ===========================================================================
+  # Job 2: Unit Tests
+  # ===========================================================================
+  unit-tests:
+    name: Unit Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: quality-gate
+    timeout-minutes: 15
+    
+    strategy:
+      matrix:
+        node-version: ['18', '20']
+      fail-fast: false
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.HUNTER_RAG_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm run test:unit:coverage -- --reporter=verbose
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Check coverage threshold
+        if: matrix.node-version == '20'
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct // 0')
+            echo "Coverage: $COVERAGE%"
+            if (( $(echo "$COVERAGE < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) )); then
+              echo "❌ Coverage below ${{ env.COVERAGE_THRESHOLD }}% threshold"
+              exit 1
+            fi
+          fi
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: matrix.node-version == '20'
+        with:
+          name: coverage-report-node${{ matrix.node-version }}
+          path: ${{ env.HUNTER_RAG_DIR }}/coverage/
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 3: Build Verification
+  # ===========================================================================
+  build:
+    name: Build Verification
+    runs-on: ubuntu-latest
+    needs: [quality-gate, unit-tests]
+    timeout-minutes: 15
+    outputs:
+      build-success: ${{ steps.build.outputs.success }}
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.HUNTER_RAG_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm ci
+
+      - name: Build application
+        id: build
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: |
+          npm run build
+          echo "success=true" >> $GITHUB_OUTPUT
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunter-rag-build
+          path: ${{ env.HUNTER_RAG_DIR }}/.next/
+          retention-days: 1
+
+  # ===========================================================================
+  # Job 4: E2E Tests (Playwright)
+  # ===========================================================================
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: |
+      (github.event_name == 'repository_dispatch' && 
+       (github.event.action == 'hunter-rag-changed-prod' || github.event.client_payload.run_e2e == 'true')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run-e2e == 'true')
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.HUNTER_RAG_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: hunter-rag-build
+          path: ${{ env.HUNTER_RAG_DIR }}/.next/
+
+      - name: Start Next.js server
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: |
+          npm run start &
+          npx wait-on http://localhost:3000 --timeout 60000
+        env:
+          PORT: 3000
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+      - name: Run E2E tests
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npx playwright test --reporter=list,html,junit
+        env:
+          BASE_URL: http://localhost:3000
+          CI: true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: |
+            ${{ env.HUNTER_RAG_DIR }}/playwright-report/
+            ${{ env.HUNTER_RAG_DIR }}/test-results/
+          retention-days: 14
+
+  # ===========================================================================
+  # Job 5: Deploy to Vercel
+  # ===========================================================================
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+    needs: [unit-tests, build]
+    if: |
+      always() && 
+      needs.build.outputs.build-success == 'true' &&
+      needs.unit-tests.result == 'success' &&
+      (github.event_name == 'repository_dispatch' || 
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'))
+    timeout-minutes: 15
+    environment:
+      name: ${{ steps.env.outputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            if [[ "${{ github.event.action }}" == "hunter-rag-changed-prod" ]]; then
+              echo "environment=production" >> $GITHUB_OUTPUT
+              echo "vercel-args=--prod" >> $GITHUB_OUTPUT
+            else
+              echo "environment=staging" >> $GITHUB_OUTPUT
+              echo "vercel-args=" >> $GITHUB_OUTPUT
+            fi
+          else
+            # workflow_dispatch
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            if [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+              echo "vercel-args=--prod" >> $GITHUB_OUTPUT
+            else
+              echo "vercel-args=" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.HUNTER_RAG_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: npm ci
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Deploy to Vercel
+        id: deploy
+        working-directory: ${{ env.HUNTER_RAG_DIR }}
+        run: |
+          DEPLOY_OUTPUT=$(vercel ${{ steps.env.outputs.vercel-args }} --token=${{ secrets.VERCEL_TOKEN }} --confirm)
+          echo "url=$DEPLOY_OUTPUT" >> $GITHUB_OUTPUT
+          echo "Deployed to: $DEPLOY_OUTPUT"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+  # ===========================================================================
+  # Job 6: Summary
+  # ===========================================================================
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [quality-gate, unit-tests, build, e2e-tests, deploy]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobs = [
+              { name: 'Quality Gate', result: '${{ needs.quality-gate.result }}' },
+              { name: 'Unit Tests', result: '${{ needs.unit-tests.result }}' },
+              { name: 'Build', result: '${{ needs.build.result }}' },
+              { name: 'E2E Tests', result: '${{ needs.e2e-tests.result }}' },
+              { name: 'Deploy', result: '${{ needs.deploy.result }}' }
+            ];
+            
+            const allSuccess = jobs.every(j => j.result === 'success' || j.result === 'skipped');
+            const status = allSuccess ? '✅' : '❌';
+            
+            let summary = `## ${status} Hunter-RAG CI/CD Complete\n\n`;
+            summary += '| Job | Status |\n|-----|--------|\n';
+            
+            jobs.forEach(job => {
+              let icon = '⚪';
+              if (job.result === 'success') icon = '✅';
+              else if (job.result === 'failure') icon = '❌';
+              else if (job.result === 'skipped') icon = '⏭️';
+              summary += `| ${job.name} | ${icon} ${job.result} |\n`;
+            });
+            
+            await core.summary.addRaw(summary).write();
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: '❌ Hunter-RAG CI/CD failed'
+          fields: repo,message,commit,author,action,eventName,ref
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
