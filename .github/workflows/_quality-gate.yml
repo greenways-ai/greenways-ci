@@ -1,0 +1,65 @@
+# =============================================================================
+# REUSABLE: Quality Gate
+# =============================================================================
+# Runs lint and type-check for the entire monorepo.
+# This is the first job that runs to catch issues early.
+#
+# Usage:
+#   uses: ./.github/workflows/_quality-gate.yml
+#
+# =============================================================================
+
+name: _Quality Gate
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      main-dir:
+        description: 'Path to main directory'
+        type: string
+        default: 'main'
+
+jobs:
+  quality-gate:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ inputs.main-dir }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn install --frozen-lockfile
+
+      - name: Run ESLint
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn lint
+
+      - name: Run TypeScript type checking
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn type-check
+
+      - name: Run Format Check
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn format:check || echo "No format check script"
+        continue-on-error: true

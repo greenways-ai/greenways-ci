@@ -1,0 +1,207 @@
+# =============================================================================
+# GW-Main Package Publishing Workflow
+# =============================================================================
+# Publishes packages from the main monorepo to npm.
+# Triggered on version tags or manually.
+#
+# =============================================================================
+
+name: Publish Packages
+
+on:
+  repository_dispatch:
+    types: [publish-packages]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version bump type (patch, minor, major)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      packages:
+        description: 'Packages to publish (comma-separated or "all")'
+        required: true
+        default: 'all'
+        type: string
+      dry-run:
+        description: 'Dry run (no actual publish)'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+  MAIN_DIR: 'main'
+
+jobs:
+  # ===========================================================================
+  # Job 1: Verify and Build
+  # ===========================================================================
+  verify-build:
+    name: Verify & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ env.MAIN_DIR }}/yarn.lock
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn install --frozen-lockfile
+
+      - name: Run Lint
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn lint
+
+      - name: Run Type Check
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn type-check
+
+      - name: Build Packages
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn build:packages
+
+      - name: Run Tests
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn test:packages --continue
+        continue-on-error: true
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-packages
+          path: |
+            ${{ env.MAIN_DIR }}/packages/**/dist
+            !${{ env.MAIN_DIR }}/packages/**/node_modules
+          retention-days: 1
+
+  # ===========================================================================
+  # Job 2: Publish to npm
+  # ===========================================================================
+  publish:
+    name: Publish Packages
+    runs-on: ubuntu-latest
+    needs: verify-build
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        package:
+          - spaces-lib-utils
+          - spaces-lib-config
+          - spaces-lib-supabase
+          - spaces-ui-config
+          - spaces-ui-common
+          - spaces-ui-editor
+          - spaces-ui-layouts
+          - spaces-feat-auth
+          - spaces-feat-billing
+          - spaces-feat-super
+          - vibe-config
+          - vibe-algo
+          - vibe-db
+          - vibe-ui
+          - wombat-kernel
+          - wombat-cli
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ env.MAIN_DIR }}/yarn.lock
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn install --frozen-lockfile
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: built-packages
+          path: ${{ env.MAIN_DIR }}
+
+      - name: Check if package should be published
+        id: check
+        run: |
+          if [[ "${{ github.event.inputs.packages }}" == "all" ]] || [[ "${{ github.event.inputs.packages }}" == *"${{ matrix.package }}"* ]]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish ${{ matrix.package }}
+        if: steps.check.outputs.should_publish == 'true'
+        working-directory: ${{ env.MAIN_DIR }}/packages/${{ matrix.package }}
+        run: |
+          if [[ "${{ github.event.inputs.dry-run }}" == "true" ]]; then
+            echo "Dry run - would publish ${{ matrix.package }}"
+            npm publish --dry-run
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true
+
+  # ===========================================================================
+  # Job 3: Create GitHub Release
+  # ===========================================================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.event.inputs.dry-run != 'true'
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Generate Release Notes
+        run: |
+          echo "## Package Updates" > release-notes.md
+          echo "" >> release-notes.md
+          echo "Published packages from main monorepo." >> release-notes.md
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          tag_name: packages-${{ github.run_number }}
+          release_name: Package Release ${{ github.run_number }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false

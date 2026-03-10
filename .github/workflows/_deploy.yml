@@ -1,0 +1,135 @@
+# =============================================================================
+# REUSABLE: Deploy Application
+# =============================================================================
+# Deploys an application to various platforms (Vercel, Netlify, etc.)
+#
+# Usage:
+#   uses: ./.github/workflows/_deploy.yml
+#   with:
+#     app: 'gw-spaces'
+#     platform: 'vercel'
+#     environment: 'staging'
+#
+# =============================================================================
+
+name: _Deploy
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: 'Application name'
+        type: string
+        required: true
+      platform:
+        description: 'Deployment platform (vercel, netlify)'
+        type: string
+        default: 'vercel'
+      environment:
+        description: 'Environment (staging, production)'
+        type: string
+        default: 'staging'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      main-dir:
+        description: 'Path to main directory'
+        type: string
+        default: 'main'
+    secrets:
+      VERCEL_TOKEN:
+        required: false
+      VERCEL_ORG_ID:
+        required: false
+      VERCEL_PROJECT_ID:
+        required: false
+      NETLIFY_TOKEN:
+        required: false
+      NETLIFY_SITE_ID:
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.app }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ inputs.main-dir }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn install --frozen-lockfile
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: app-${{ inputs.app }}-build
+          path: ${{ inputs.main-dir }}/apps/${{ inputs.app }}/.next
+
+      # =======================================================================
+      # Deploy to Vercel
+      # =======================================================================
+      - name: Deploy to Vercel
+        if: inputs.platform == 'vercel'
+        id: deploy-vercel
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: |
+          npm i -g vercel@latest
+          if [ "${{ inputs.environment }}" == "production" ]; then
+            DEPLOY_OUTPUT=$(vercel --prod --token=${{ secrets.VERCEL_TOKEN }} --confirm)
+          else
+            DEPLOY_OUTPUT=$(vercel --token=${{ secrets.VERCEL_TOKEN }} --confirm)
+          fi
+          echo "url=$DEPLOY_OUTPUT" >> $GITHUB_OUTPUT
+          echo "Deployed to: $DEPLOY_OUTPUT"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # =======================================================================
+      # Deploy to Netlify
+      # =======================================================================
+      - name: Deploy to Netlify
+        if: inputs.platform == 'netlify'
+        id: deploy-netlify
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          npm i -g netlify-cli
+          cd ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+          if [ "${{ inputs.environment }}" == "production" ]; then
+            DEPLOY_OUTPUT=$(netlify deploy --prod --dir=.next --message="Deploy from GitHub Actions")
+          else
+            DEPLOY_OUTPUT=$(netlify deploy --dir=.next --message="Deploy from GitHub Actions")
+          fi
+          echo "url=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^"]*' | head -1)" >> $GITHUB_OUTPUT
+
+      - name: Set deployment output
+        id: deploy
+        run: |
+          if [ "${{ inputs.platform }}" == "vercel" ]; then
+            echo "url=${{ steps.deploy-vercel.outputs.url }}" >> $GITHUB_OUTPUT
+          else
+            echo "url=${{ steps.deploy-netlify.outputs.url }}" >> $GITHUB_OUTPUT
+          fi

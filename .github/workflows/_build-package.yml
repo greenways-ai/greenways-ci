@@ -1,0 +1,84 @@
+# =============================================================================
+# REUSABLE: Build Package
+# =============================================================================
+# Builds a specific package from the monorepo with Turbo caching.
+#
+# Usage:
+#   uses: ./.github/workflows/_build-package.yml
+#   with:
+#     package: 'spaces-ui-common'
+#     node-version: '20'
+#
+# =============================================================================
+
+name: _Build Package
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: 'Package name (without @greenways/ prefix)'
+        type: string
+        required: true
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      main-dir:
+        description: 'Path to main directory'
+        type: string
+        default: 'main'
+
+jobs:
+  build-package:
+    name: Build ${{ inputs.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ inputs.main-dir }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn install --frozen-lockfile
+
+      - name: Restore Turbo Cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.main-dir }}/.turbo
+          key: turbo-${{ github.sha }}-${{ inputs.package }}
+          restore-keys: |
+            turbo-
+
+      - name: Build Package
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn turbo build --filter=@greenways/${{ inputs.package }}
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ inputs.package }}-dist
+          path: |
+            ${{ inputs.main-dir }}/packages/**/${{ inputs.package }}/dist
+            !${{ inputs.main-dir }}/packages/**/node_modules
+          retention-days: 1
+
+      - name: Run Package Tests
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn turbo test --filter=@greenways/${{ inputs.package }} -- --run
+        continue-on-error: true

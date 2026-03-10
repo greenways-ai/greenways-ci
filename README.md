@@ -2,144 +2,336 @@
 
 CI/CD workflows for Greenways AI projects.
 
+## Architecture
+
+This repository uses a **modular, reusable workflow architecture** for managing a multi-project monorepo:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           WORKFLOW STRUCTURE                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  REUSABLE WORKFLOWS ( underscore prefix )                                    │
+│  ├── _quality-gate.yml      - Lint + TypeScript checks                       │
+│  ├── _build-package.yml     - Build a single package                         │
+│  ├── _build-app.yml         - Build + test a single app                      │
+│  └── _deploy.yml            - Deploy to Vercel/Netlify                       │
+│                                                                              │
+│  ORCHESTRATOR WORKFLOWS                                                      │
+│  ├── ci-cd.yml              - Main CI/CD pipeline (monorepo)                 │
+│  ├── gw-publish-packages.yml - Package publishing to npm                     │
+│  └── web-main.yml           - Legacy web deployments                         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Workflows
 
-### Web Deployments
+### Main CI/CD (ci-cd.yml)
 
-- **web-main.yml** - Deploys to Netlify (handles both staging and production)
+The primary workflow that coordinates CI/CD for the entire monorepo (`/main`):
 
-### Hunter-RAG CI/CD
+**Phase 1: Quality Gate**
+- ESLint, TypeScript type checking, format checking
 
-- **hunter-rag-ci.yml** - Comprehensive CI/CD for Hunter-RAG (Narrative Hunter) project
-  - Code quality checks (lint, typecheck, format)
-  - Unit tests with coverage (Node 18/20 matrix)
-  - Build verification
-  - E2E tests with Playwright (optional)
-  - Deployment to Vercel
-  - Slack notifications
+**Phase 2: Build Packages (Parallel)**
+- All spaces/*, vibe/*, and wombat/* packages
+- Uses Turbo for caching and incremental builds
 
-### Triggers
+**Phase 3: Build & Test Apps (Parallel)**
+- **gw-spaces**: Vitest + Playwright E2E
+- **gw-vibe-engine**: Jest + Playwright E2E
+- **gw-ragtrain**: Build only (no tests yet)
+- **wombat-kernal**: Vitest
 
-Workflows can be triggered via:
-- `repository_dispatch` events from the main repo (`gw-v2`)
-- Manual `workflow_dispatch` triggers with environment selection
+**Phase 4: Build Storybooks**
+- gw-spaces-storybook
+- gw-vibe-engine-storybook
 
-### Required Secrets
+**Phase 5: Deploy Storybook (Chromatic)**
+- Visual regression testing
+- Auto-accept on main branch
 
-| Secret | Description |
-|--------|-------------|
-| `GH_TOKEN` | GitHub Personal Access Token with repo access |
-| `NETLIFY_TOKEN` | Netlify authentication token |
-| `NETLIFY_WEB_TEST_ID` | Netlify site ID for test/staging environment |
-| `NETLIFY_WEB_PROD_ID` | Netlify site ID for production environment |
+**Phase 6: Deploy Apps (Conditional)**
+- Deploy to Netlify (GW-Spaces and GW-Vibe-Engine)
+
+### Package Publishing (gw-publish-packages.yml)
+
+Publishes packages to npm:
+- Verifies and builds all packages
+- Publishes to npm registry
+- Creates GitHub releases
+
+### Legacy Web Deployments (web-main.yml)
+
+Deploys static sites to Netlify:
+- Staging/Production environments
+- Uses local deployment scripts
+
+## Project Structure
+
+The monorepo (`/main`) contains:
+
+```
+main/
+├── apps/
+│   ├── gw-spaces/              Next.js + Vitest + Playwright
+│   ├── gw-vibe-engine/         Next.js + Jest + Playwright
+│   ├── gw-ragtrain/            Next.js (tests TBD)
+│   └── wombat-kernal/          Next.js + Vitest
+├── packages/
+│   ├── spaces/                 UI components & features
+│   │   ├── lib-*               Utility libraries
+│   │   ├── ui-*                UI components
+│   │   └── feat-*              Feature modules
+│   ├── vibe/                   VibeEngine packages
+│   └── wombat/                 Wombat kernel packages
+└── storybook/
+    ├── gw-spaces-storybook/
+    └── gw-vibe-engine-storybook/
+```
+
+## Triggers
+
+### Automatic (on push)
+
+| Branch | Trigger |
+|--------|---------|
+| `main` | Full CI/CD + Production Deploy |
+| `staging` | CI + Staging Deploy |
+| `develop` | CI only |
+| PR to `main`/`staging` | CI only |
+
+### Manual (workflow_dispatch)
+
+Configure via GitHub UI or CLI:
+- Environment (staging/production)
+- Apps to build (all or specific)
+- Run tests (yes/no)
+- Run E2E tests (yes/no)
+- Deploy (yes/no)
+- Deploy Storybook (yes/no)
+
+### Repository Dispatch (API)
+
+Trigger from external systems:
+
+```bash
+# Trigger full CI
+curl -X POST \
+  -H "Authorization: token $GH_TOKEN" \
+  -H "Accept: application/vnd.github.v3+json" \
+  https://api.github.com/repos/greenways-ai/greenways-ci/dispatches \
+  -d '{"event_type":"main-changed"}'
+
+# Trigger production deploy
+curl -X POST \
+  -H "Authorization: token $GH_TOKEN" \
+  -H "Accept: application/vnd.github.v3+json" \
+  https://api.github.com/repos/greenways-ai/greenways-ci/dispatches \
+  -d '{"event_type":"main-changed-prod"}'
+```
 
 ## Usage
 
-### Automatic Deployment (via git push)
-
-- Push to `main` branch → Deploys to **production**
-- Push to other branches → Deploys to **staging**
-
-### Manual Trigger
+### Makefile Commands
 
 ```bash
-# Deploy to staging
-gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=staging
+# General
+make list              # List all workflows
+make runs              # View recent runs
+make watch             # Watch latest run
 
-# Deploy to production  
-gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=production
+# CI/CD Pipeline
+ci                     # Run CI/CD (default)
+ci-staging             # CI for staging (no deploy)
+ci-prod                # Full pipeline with E2E + deploy
+ci-test                # Tests only
+ci-e2e                 # With E2E tests
 
-# Or use the Makefile
-cd cache/greenways-ci
-make deploy-staging
-make deploy-prod
+# Specific Apps
+ci-spaces              # GW-Spaces only
+ci-vibe                # GW-Vibe-Engine only
+ci-ragtrain            # GW-RAGTrain only
+
+# Deployments
+deploy-spaces          # Deploy GW-Spaces
+deploy-vibe            # Deploy GW-Vibe-Engine
+deploy-ragtrain        # Deploy GW-RAGTrain
+deploy-prod            # Deploy all to production
+
+# Storybook
+storybook-chromatic    # Deploy to Chromatic
+
+# Package Publishing
+packages-publish       # Dry run
+packages-publish-now   # Actual publish
+
+# Legacy
+web-deploy             # Legacy web deployments
 ```
 
-### Repository Dispatch (from gw-v2)
-
-To trigger deployments from the main repository:
+### GitHub CLI
 
 ```bash
-# Trigger staging deployment
-curl -X POST \
-  -H "Authorization: token $GH_TOKEN" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/greenways-ai/greenways-ci/dispatches \
-  -d '{"event_type":"ui-changed"}'
+# Run CI/CD with custom options
+gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+  -f environment=staging \
+  -f apps=gw-spaces,gw-vibe-engine \
+  -f run-tests=true \
+  -f run-e2e=true \
+  -f deploy=true
 
-# Trigger production deployment
-curl -X POST \
-  -H "Authorization: token $GH_TOKEN" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/greenways-ai/greenways-ci/dispatches \
-  -d '{"event_type":"ui-changed-prod"}'
+# Run specific app only
+gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+  -f apps=gw-spaces \
+  -f run-e2e=true
+
+# Deploy Storybook only
+gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+  -f deploy-storybook=true \
+  -f run-tests=false
 ```
 
-## Hunter-RAG Usage
+## Required Secrets
 
-### Automatic CI/CD (via git push)
-
-When you push changes to `src-js/hunter-rag/` in the `gw-v2` repo:
-
-- **Push to `main`** → Triggers production deployment with E2E tests
-- **Push to `develop`** → Triggers staging deployment (no E2E)
-- **Pull Request** → Triggers test run (no deployment)
-
-### Manual Trigger
-
-```bash
-# Run Hunter-RAG CI with defaults (staging, tests only)
-gh workflow run hunter-rag-ci.yml --repo greenways-ai/greenways-ci
-
-# Run with E2E tests
-gh workflow run hunter-rag-ci.yml --repo greenways-ai/greenways-ci \
-  -f environment=staging -f run-e2e=true
-
-# Deploy to production
-gh workflow run hunter-rag-ci.yml --repo greenways-ai/greenways-ci \
-  -f environment=production -f deploy=true
-
-# Or use the Makefile
-cd cache/greenways-ci
-make hunter-rag-staging    # Staging with tests
-make hunter-rag-prod       # Production with E2E
-make hunter-rag-test       # Tests only (no deploy)
-make hunter-rag-e2e        # With E2E tests
-```
-
-### Required Secrets for Hunter-RAG
+### All Workflows
 
 | Secret | Description |
 |--------|-------------|
-| `GH_TOKEN` | GitHub Personal Access Token with repo access |
+| `GH_TOKEN` | GitHub PAT with repo access |
+| `SLACK_WEBHOOK_URL` | Slack notifications (optional) |
+
+### Main CI/CD (ci-cd.yml)
+
+| Secret | Description |
+|--------|-------------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anonymous key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key |
-| `VERCEL_TOKEN` | Vercel authentication token |
-| `VERCEL_ORG_ID` | Vercel organization ID |
-| `VERCEL_PROJECT_ID` | Vercel project ID |
-| `SLACK_WEBHOOK_URL` | Slack webhook for notifications |
+| `TEST_USER_EMAIL` | E2E test user email |
+| `TEST_USER_PASSWORD` | E2E test user password |
+| `CHROMATIC_PROJECT_TOKEN` | Chromatic project token |
+| `NETLIFY_TOKEN` | Netlify auth token |
+| `NETLIFY_WEB_TEST_ID` | Netlify site ID for GW-Spaces (staging) |
+| `NETLIFY_WEB_PROD_ID` | Netlify site ID for GW-Spaces (production) |
+| `NETLIFY_VIBE_TEST_ID` | Netlify site ID for GW-Vibe-Engine (staging) |
+| `NETLIFY_VIBE_PROD_ID` | Netlify site ID for GW-Vibe-Engine (production) |
 
-## How It Works
+### Package Publishing
 
-### Web Deployments (Netlify)
+| Secret | Description |
+|--------|-------------|
+| `NPM_TOKEN` | npm auth token |
 
-The workflow uses the local deployment script (`scripts/deploy-netlify.sh`) from the `gw-v2` repository:
+### Legacy Web Deployments (web-main.yml)
 
-1. Checks out the `gw-v2` repo with submodules
-2. Determines the target environment (staging vs production)
-3. Runs `./scripts/deploy-netlify.sh <environment>`
-4. The script handles building and deploying to Netlify
+These secrets are used by the legacy web-main.yml workflow:
 
-### Hunter-RAG CI/CD (Vercel)
+| Secret | Description |
+|--------|-------------|
+| `NETLIFY_TOKEN` | Netlify auth token |
+| `NETLIFY_WEB_TEST_ID` | Staging site ID |
+| `NETLIFY_WEB_PROD_ID` | Production site ID |
 
-The Hunter-RAG workflow runs comprehensive CI/CD:
+## Design Principles
 
-1. **Quality Gate** - ESLint, Prettier, TypeScript checks
-2. **Unit Tests** - Runs on Node 18 and 20 with coverage threshold
-3. **Build** - Creates production Next.js build
-4. **E2E Tests** (optional) - Playwright browser tests
-5. **Deploy** - Deploys to Vercel (staging or production)
-6. **Notify** - Sends Slack notification on failure
+### 1. Modularity
+Each workflow has a single responsibility. The orchestrator (`ci-cd.yml`) composes reusable workflows.
 
-This ensures consistency between local development and CI deployments.
+### 2. Parallelization
+Independent jobs run in parallel:
+- All packages build simultaneously
+- All apps build simultaneously
+- Different test suites run in parallel
+
+### 3. Selective Execution
+Only run what's needed:
+- Skip apps not in the `apps` filter
+- Skip E2E tests unless explicitly enabled
+- Skip deploy on non-main branches
+
+### 4. Caching
+Aggressive caching at multiple levels:
+- Yarn dependencies
+- Turbo build cache
+- Package build artifacts
+- Playwright browsers
+
+### 5. Flexibility
+Support different test runners:
+- **Vitest**: gw-spaces, wombat packages
+- **Jest**: gw-vibe-engine
+- **Playwright**: E2E tests for all apps
+
+## Adding a New App
+
+To add a new app to the CI/CD pipeline:
+
+1. **Create app workflow call in `ci-cd.yml`**:
+
+```yaml
+app-my-new-app:
+  name: 🆕 My-New-App
+  needs: [quality-gate, build-packages]
+  if: |
+    github.event.inputs.apps == 'all' || 
+    contains(github.event.inputs.apps, 'my-new-app')
+  uses: ./.github/workflows/_build-app.yml
+  with:
+    app: 'my-new-app'
+    test-runner: 'vitest'  # or 'jest' or 'none'
+    run-e2e: true
+    e2e-runner: 'playwright'
+  secrets: inherit
+```
+
+2. **Add deployment job** (if needed):
+
+```yaml
+deploy-my-new-app:
+  name: 🚀 Deploy My-New-App
+  needs: [app-my-new-app]
+  if: |
+    always() && 
+    needs.app-my-new-app.result == 'success' &&
+    github.ref == 'refs/heads/main'
+  uses: ./.github/workflows/_deploy.yml
+  with:
+    app: 'my-new-app'
+    platform: 'vercel'
+    environment: 'production'
+  secrets: inherit
+```
+
+3. **Update summary job** to include the new app
+
+4. **Add Makefile commands**:
+
+```makefile
+ci-my-app:
+	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+		-f apps=my-new-app -f run-tests=true
+
+deploy-my-app:
+	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+		-f apps=my-new-app -f deploy=true
+```
+
+## Troubleshooting
+
+### Jobs Skipped Unexpectedly
+Check the `if` conditions in the workflow. Jobs may be skipped based on:
+- Branch name
+- Input parameters
+- Previous job results
+
+### Cache Not Working
+Turbo cache is keyed by git SHA. If you need to clear cache:
+```bash
+gh cache list --repo greenways-ai/greenways-ci
+gh cache delete <key> --repo greenways-ai/greenways-ci
+```
+
+### Secrets Not Available
+Ensure secrets are set at the repository or organization level, not just environment level.

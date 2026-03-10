@@ -1,0 +1,435 @@
+# =============================================================================
+# MAIN CI/CD ORCHESTRATOR
+# =============================================================================
+# Coordinates CI/CD for the entire monorepo.
+# Uses reusable workflows for modularity.
+#
+# Triggers:
+#   - Push to main/staging → Full CI + Deploy
+#   - Push to develop → CI only
+#   - Pull Request → CI only
+#   - Manual dispatch → Configurable
+#
+# Apps Managed:
+#   - gw-spaces (Next.js + Vitest + Playwright)
+#   - gw-vibe-engine (Next.js + Jest + Playwright)
+#   - gw-ragtrain (Next.js)
+#   - wombat-kernal
+#
+# Packages Managed:
+#   - spaces/* (ui-common, ui-layouts, ui-editor, feat-*, lib-*)
+#   - vibe/* (config, algo, db, ui)
+#   - wombat/* (kernel, cli)
+#
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, staging, develop]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options: [staging, production]
+      apps:
+        description: 'Apps to build (comma-separated or "all")'
+        required: true
+        default: 'all'
+        type: string
+      run-tests:
+        description: 'Run unit tests'
+        required: false
+        default: true
+        type: boolean
+      run-e2e:
+        description: 'Run E2E tests'
+        required: false
+        default: false
+        type: boolean
+      deploy:
+        description: 'Deploy after build'
+        required: false
+        default: false
+        type: boolean
+      deploy-storybook:
+        description: 'Deploy Storybook to Chromatic'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+  MAIN_DIR: 'main'
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # PHASE 1: Quality Gate (Always runs first)
+  # ===========================================================================
+  quality-gate:
+    name: 🔍 Quality Gate
+    uses: ./.github/workflows/_quality-gate.yml
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+    secrets: inherit
+
+  # ===========================================================================
+  # PHASE 2: Build All Packages (Parallel)
+  # ===========================================================================
+  build-packages:
+    name: 📦 Build Packages
+    needs: quality-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          # Spaces packages (dependency order matters for caching)
+          - spaces-lib-config
+          - spaces-lib-utils
+          - spaces-lib-supabase
+          - spaces-ui-config
+          - spaces-ui-common
+          - spaces-ui-editor
+          - spaces-ui-layouts
+          - spaces-feat-auth
+          - spaces-feat-billing
+          - spaces-feat-super
+          # Vibe packages
+          - vibe-config
+          - vibe-algo
+          - vibe-db
+          - vibe-ui
+          # Wombat packages
+          - wombat-kernel
+          - wombat-cli
+    uses: ./.github/workflows/_build-package.yml
+    with:
+      package: ${{ matrix.package }}
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+    secrets: inherit
+
+  # ===========================================================================
+  # PHASE 3: Build & Test Applications (Parallel)
+  # ===========================================================================
+  
+  # ---------------------------------------------------------------------------
+  # App: gw-spaces (Main Spaces Application)
+  # ---------------------------------------------------------------------------
+  app-gw-spaces:
+    name: 🚀 GW-Spaces
+    needs: [quality-gate, build-packages]
+    if: |
+      github.event.inputs.apps == 'all' || 
+      contains(github.event.inputs.apps, 'gw-spaces') ||
+      github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/_build-app.yml
+    with:
+      app: 'gw-spaces'
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+      test-runner: 'vitest'
+      run-unit-tests: ${{ github.event.inputs.run-tests != 'false' }}
+      run-e2e: ${{ github.event.inputs.run-e2e == 'true' || (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+      e2e-runner: 'playwright'
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # App: gw-vibe-engine (Vibe Engine Application)
+  # ---------------------------------------------------------------------------
+  app-gw-vibe-engine:
+    name: 🌊 GW-Vibe-Engine
+    needs: [quality-gate, build-packages]
+    if: |
+      github.event.inputs.apps == 'all' || 
+      contains(github.event.inputs.apps, 'gw-vibe-engine') ||
+      github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/_build-app.yml
+    with:
+      app: 'gw-vibe-engine'
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+      test-runner: 'jest'
+      run-unit-tests: ${{ github.event.inputs.run-tests != 'false' }}
+      run-e2e: ${{ github.event.inputs.run-e2e == 'true' }}
+      e2e-runner: 'playwright'
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # App: gw-ragtrain (RAG Training Application)
+  # ---------------------------------------------------------------------------
+  app-gw-ragtrain:
+    name: 🤖 GW-RAGTrain
+    needs: [quality-gate, build-packages]
+    if: |
+      github.event.inputs.apps == 'all' || 
+      contains(github.event.inputs.apps, 'gw-ragtrain') ||
+      github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/_build-app.yml
+    with:
+      app: 'gw-ragtrain'
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+      test-runner: 'none'  # No tests yet
+      run-unit-tests: false
+      run-e2e: false
+      e2e-runner: 'none'
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # App: wombat-kernal (Wombat Kernel)
+  # ---------------------------------------------------------------------------
+  app-wombat-kernal:
+    name: 🧠 Wombat-Kernal
+    needs: [quality-gate, build-packages]
+    if: |
+      github.event.inputs.apps == 'all' || 
+      contains(github.event.inputs.apps, 'wombat-kernal') ||
+      github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/_build-app.yml
+    with:
+      app: 'wombat-kernal'
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+      test-runner: 'vitest'
+      run-unit-tests: ${{ github.event.inputs.run-tests != 'false' }}
+      run-e2e: false
+      e2e-runner: 'none'
+    secrets: inherit
+
+  # ===========================================================================
+  # PHASE 4: Build Storybooks
+  # ===========================================================================
+  build-storybooks:
+    name: 📚 Build Storybooks
+    needs: [quality-gate, build-packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ env.MAIN_DIR }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn install --frozen-lockfile
+
+      - name: Restore Package Builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.MAIN_DIR }}/packages/**/dist
+            !${{ env.MAIN_DIR }}/packages/**/node_modules
+          key: packages-dist-${{ github.sha }}
+
+      - name: Build Storybooks
+        working-directory: ${{ env.MAIN_DIR }}
+        run: |
+          yarn turbo build --filter=@greenways/gw-spaces-storybook
+          yarn turbo build --filter=@greenways/gw-vibe-engine-storybook
+
+      - name: Upload Storybook Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: storybook-static
+          path: |
+            ${{ env.MAIN_DIR }}/storybook/**/storybook-static
+          retention-days: 7
+
+  # ===========================================================================
+  # PHASE 5: Deploy Storybook to Chromatic
+  # ===========================================================================
+  deploy-chromatic:
+    name: 🎨 Deploy Chromatic
+    needs: [build-storybooks]
+    if: |
+      always() && 
+      needs.build-storybooks.result == 'success' &&
+      (github.ref == 'refs/heads/main' || 
+       github.event.inputs.deploy-storybook == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ env.MAIN_DIR }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn install --frozen-lockfile
+
+      - name: Restore Package Builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.MAIN_DIR }}/packages/**/dist
+            !${{ env.MAIN_DIR }}/packages/**/node_modules
+          key: packages-dist-${{ github.sha }}
+
+      - name: Build Storybook
+        working-directory: ${{ env.MAIN_DIR }}
+        run: yarn turbo build --filter=@greenways/gw-spaces-storybook
+
+      - name: Publish to Chromatic
+        uses: chromaui/action@latest
+        with:
+          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+          workingDir: ${{ env.MAIN_DIR }}/storybook/gw-spaces-storybook
+          buildScriptName: build-storybook
+          exitZeroOnChanges: true
+          autoAcceptChanges: ${{ github.ref == 'refs/heads/main' }}
+
+  # ===========================================================================
+  # PHASE 6: Deploy Applications (Production only)
+  # ===========================================================================
+  
+  deploy-gw-spaces:
+    name: 🚀 Deploy GW-Spaces
+    needs: [app-gw-spaces]
+    if: |
+      always() && 
+      needs.app-gw-spaces.result == 'success' &&
+      (github.ref == 'refs/heads/main' || 
+       (github.event.inputs.deploy == 'true' && contains(github.event.inputs.apps, 'gw-spaces')))
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      app: 'gw-spaces'
+      platform: 'netlify'
+      environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+    secrets:
+      NETLIFY_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+      NETLIFY_SITE_ID: ${{ github.ref == 'refs/heads/main' && secrets.NETLIFY_WEB_PROD_ID || secrets.NETLIFY_WEB_TEST_ID }}
+
+  deploy-gw-vibe-engine:
+    name: 🌊 Deploy GW-Vibe-Engine
+    needs: [app-gw-vibe-engine]
+    if: |
+      always() && 
+      needs.app-gw-vibe-engine.result == 'success' &&
+      (github.ref == 'refs/heads/main' || 
+       (github.event.inputs.deploy == 'true' && contains(github.event.inputs.apps, 'gw-vibe-engine')))
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      app: 'gw-vibe-engine'
+      platform: 'netlify'
+      environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+    secrets:
+      NETLIFY_TOKEN: ${{ secrets.NETLIFY_TOKEN }}
+      NETLIFY_SITE_ID: ${{ github.ref == 'refs/heads/main' && secrets.NETLIFY_VIBE_PROD_ID || secrets.NETLIFY_VIBE_TEST_ID }}
+
+  # ===========================================================================
+  # PHASE 7: Summary
+  # ===========================================================================
+  summary:
+    name: 📊 Pipeline Summary
+    needs: 
+      - quality-gate
+      - build-packages
+      - app-gw-spaces
+      - app-gw-vibe-engine
+      - app-gw-ragtrain
+      - app-wombat-kernal
+      - build-storybooks
+      - deploy-chromatic
+      - deploy-gw-spaces
+      - deploy-gw-vibe-engine
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobs = [
+              { name: '🔍 Quality Gate', result: '${{ needs.quality-gate.result }}', required: true },
+              { name: '📦 Build Packages', result: '${{ needs.build-packages.result }}', required: true },
+              { name: '🚀 GW-Spaces', result: '${{ needs.app-gw-spaces.result }}', required: false },
+              { name: '🌊 GW-Vibe-Engine', result: '${{ needs.app-gw-vibe-engine.result }}', required: false },
+              { name: '🤖 GW-RAGTrain', result: '${{ needs.app-gw-ragtrain.result }}', required: false },
+              { name: '🧠 Wombat-Kernal', result: '${{ needs.app-wombat-kernal.result }}', required: false },
+              { name: '📚 Build Storybooks', result: '${{ needs.build-storybooks.result }}', required: false },
+              { name: '🎨 Deploy Chromatic', result: '${{ needs.deploy-chromatic.result }}', required: false },
+              { name: '🚀 Deploy GW-Spaces', result: '${{ needs.deploy-gw-spaces.result }}', required: false },
+              { name: '🌊 Deploy GW-Vibe-Engine', result: '${{ needs.deploy-gw-vibe-engine.result }}', required: false }
+            ];
+            
+            const requiredJobs = jobs.filter(j => j.required);
+            const failedRequired = requiredJobs.filter(j => j.result === 'failure');
+            const allSuccess = failedRequired.length === 0;
+            const status = allSuccess ? '✅' : '❌';
+            
+            let summary = `## ${status} CI/CD Pipeline Complete\n\n`;
+            summary += '| Job | Status | Required |\n|-----|--------|----------|\n';
+            
+            jobs.forEach(job => {
+              let icon = '⚪';
+              if (job.result === 'success') icon = '✅';
+              else if (job.result === 'failure') icon = '❌';
+              else if (job.result === 'skipped') icon = '⏭️';
+              const required = job.required ? '✓' : '';
+              summary += `| ${job.name} | ${icon} ${job.result} | ${required} |\n`;
+            });
+            
+            summary += '\n**Legend:** ✓ = Required to pass\n';
+            
+            if (!allSuccess) {
+              summary += '\n### ❌ Required Jobs Failed\n';
+              failedRequired.forEach(job => {
+                summary += `- ${job.name}\n`;
+              });
+            }
+            
+            await core.summary.addRaw(summary).write();
+
+      - name: Notify Slack
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: '❌ CI/CD Pipeline Failed'
+          fields: repo,message,commit,author,action,eventName,ref
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
