@@ -1,0 +1,154 @@
+# =============================================================================
+# REUSABLE: Test tRPC Routers
+# =============================================================================
+# Runs comprehensive tRPC router tests including unit, integration,
+# and type safety tests.
+#
+# Usage:
+#   uses: ./.github/workflows/_test-trpc.yml
+#   with:
+#     app: 'gw-spaces'
+#     coverage: true
+#
+# =============================================================================
+
+name: _Test tRPC Routers
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: 'Application name (without @greenways/ prefix)'
+        type: string
+        required: true
+        default: 'gw-spaces'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      main-dir:
+        description: 'Path to main directory'
+        type: string
+        default: 'main'
+      coverage:
+        description: 'Generate coverage report'
+        type: boolean
+        default: true
+
+jobs:
+  test-trpc:
+    name: Test tRPC Routers (${{ inputs.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout gw-v2 repository
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          token: ${{ secrets.GH_TOKEN }}
+          submodules: recursive
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'yarn'
+          cache-dependency-path: ${{ inputs.main-dir }}/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.main-dir }}
+        run: yarn install --frozen-lockfile
+
+      - name: Restore Package Builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ inputs.main-dir }}/packages/**/dist
+            !${{ inputs.main-dir }}/packages/**/node_modules
+          key: packages-dist-${{ github.sha }}
+          restore-keys: |
+            packages-dist-
+
+      - name: Run tRPC Unit Tests
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: yarn test src/server/trpc/__tests__/users.test.ts --run
+        continue-on-error: true
+        env:
+          CI: true
+
+      - name: Run tRPC Integration Tests
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: yarn test src/server/trpc/__tests__/integration.test.ts --run
+        continue-on-error: true
+        env:
+          CI: true
+
+      - name: Run tRPC Type Safety Tests
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: yarn test src/server/trpc/__tests__/types.test.ts --run
+        continue-on-error: true
+        env:
+          CI: true
+
+      - name: Run tRPC Coverage Report
+        if: inputs.coverage
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: yarn test src/server/trpc/__tests__/coverage.test.ts --run
+        continue-on-error: true
+        env:
+          CI: true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app }}-trpc-test-results
+          path: |
+            ${{ inputs.main-dir }}/apps/${{ inputs.app }}/test-results/
+            ${{ inputs.main-dir }}/apps/${{ inputs.app }}/coverage/
+          retention-days: 14
+
+      - name: Comment Test Results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = '${{ inputs.main-dir }}/apps/${{ inputs.app }}/test-results/results.json';
+            
+            let summary = '## 🧪 tRPC Test Results\n\n';
+            
+            if (fs.existsSync(path)) {
+              const results = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const passed = results.numPassedTests || 0;
+              const failed = results.numFailedTests || 0;
+              const total = passed + failed;
+              
+              summary += `**Total:** ${total} tests\n`;
+              summary += `**Passed:** ${passed} ✅\n`;
+              summary += `**Failed:** ${failed} ❌\n\n`;
+              
+              if (failed > 0) {
+                summary += '### Failed Tests\n';
+                results.testResults?.forEach(suite => {
+                  suite.assertionResults?.forEach(test => {
+                    if (test.status === 'failed') {
+                      summary += `- ${test.title}\n`;
+                    }
+                  });
+                });
+              }
+            } else {
+              summary += '⚠️ Test results not found\n';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });

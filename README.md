@@ -147,6 +147,7 @@ ci                     # Run CI/CD (default)
 ci-staging             # CI for staging (no deploy)
 ci-prod                # Full pipeline with E2E + deploy
 ci-test                # Tests only
+ci-test-trpc           # tRPC tests only (gw-spaces)
 ci-e2e                 # With E2E tests
 
 # Specific Apps

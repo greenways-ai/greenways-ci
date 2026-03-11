@@ -104,6 +104,8 @@ jobs:
           - spaces-ui-layouts
           - spaces-feat-auth
           - spaces-feat-billing
+          - spaces-feat-chat
+          - spaces-feat-settings
           - spaces-feat-super
           # Vibe packages
           - vibe-config
@@ -209,7 +211,25 @@ jobs:
     secrets: inherit
 
   # ===========================================================================
-  # PHASE 4: Build Storybooks
+  # PHASE 4: tRPC Tests (GW-Spaces)
+  # ===========================================================================
+  test-trpc:
+    name: 🧪 tRPC Tests
+    needs: [quality-gate, build-packages]
+    if: |
+      github.event.inputs.apps == 'all' || 
+      contains(github.event.inputs.apps, 'gw-spaces') ||
+      github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/_test-trpc.yml
+    with:
+      app: 'gw-spaces'
+      node-version: ${{ env.NODE_VERSION }}
+      main-dir: ${{ env.MAIN_DIR }}
+      coverage: true
+    secrets: inherit
+
+  # ===========================================================================
+  # PHASE 5: Build Storybooks
   # ===========================================================================
   build-storybooks:
     name: 📚 Build Storybooks
@@ -371,6 +391,7 @@ jobs:
       - app-gw-vibe-engine
       - app-gw-ragtrain
       - app-wombat-kernal
+      - test-trpc
       - build-storybooks
       - deploy-chromatic
       - deploy-gw-spaces
@@ -390,6 +411,7 @@ jobs:
               { name: '🌊 GW-Vibe-Engine', result: '${{ needs.app-gw-vibe-engine.result }}', required: false },
               { name: '🤖 GW-RAGTrain', result: '${{ needs.app-gw-ragtrain.result }}', required: false },
               { name: '🧠 Wombat-Kernal', result: '${{ needs.app-wombat-kernal.result }}', required: false },
+              { name: '🧪 tRPC Tests', result: '${{ needs.test-trpc.result }}', required: false },
               { name: '📚 Build Storybooks', result: '${{ needs.build-storybooks.result }}', required: false },
               { name: '🎨 Deploy Chromatic', result: '${{ needs.deploy-chromatic.result }}', required: false },
               { name: '🚀 Deploy GW-Spaces', result: '${{ needs.deploy-gw-spaces.result }}', required: false },

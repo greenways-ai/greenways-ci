@@ -116,6 +116,24 @@ jobs:
         env:
           CI: true
 
+      - name: Run tRPC Tests
+        if: inputs.run-unit-tests && inputs.app == 'gw-spaces'
+        working-directory: ${{ inputs.main-dir }}/apps/${{ inputs.app }}
+        run: yarn test src/server/trpc/__tests__ --run
+        continue-on-error: true
+        env:
+          CI: true
+
+      - name: Upload tRPC Test Results
+        if: inputs.run-unit-tests && inputs.app == 'gw-spaces' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app }}-trpc-test-results
+          path: |
+            ${{ inputs.main-dir }}/apps/${{ inputs.app }}/test-results/
+            ${{ inputs.main-dir }}/apps/${{ inputs.app }}/coverage/
+          retention-days: 14
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:

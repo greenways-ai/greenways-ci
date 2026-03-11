@@ -1,7 +1,7 @@
 # Greenways CI - Makefile
 # Provides convenient commands for triggering workflows
 
-.PHONY: list runs ci ci-staging ci-prod ci-test ci-e2e \
+.PHONY: list runs ci ci-staging ci-prod ci-test ci-test-trpc ci-e2e \
         deploy-spaces deploy-vibe deploy-ragtrain \
         storybook storybook-chromatic \
         packages-publish packages-publish-now
@@ -44,6 +44,11 @@ ci-prod:
 ci-test:
 	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
 		-f environment=staging -f run-tests=true -f run-e2e=false -f deploy=false
+
+# Run tRPC tests only
+ci-test-trpc:
+	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
+		-f environment=staging -f apps=gw-spaces -f run-tests=true -f run-e2e=false -f deploy=false
 
 # Run with E2E tests
 ci-e2e:

@@ -281,7 +281,7 @@ Each app has its own job with specific configuration:
 
 | App | Test Runner | E2E | Notes |
 |-----|-------------|-----|-------|
-| gw-spaces | Vitest | Playwright | Main application |
+| gw-spaces | Vitest | Playwright | Main application + tRPC tests |
 | gw-vibe-engine | Jest | Playwright | Uses Jest for legacy reasons |
 | gw-ragtrain | none | none | Tests not yet implemented |
 | wombat-kernal | Vitest | none | Kernel application |
@@ -342,6 +342,41 @@ All packages in the matrix:
 
 **Wombat (2 packages)**:
 - kernel, cli
+
+## tRPC Testing
+
+The GW-Spaces application includes comprehensive tRPC router testing:
+
+### Test Structure
+```
+main/apps/gw-spaces/src/server/trpc/__tests__/
+├── setup.ts              # Test utilities and mocks
+├── users.test.ts         # Users router tests
+├── organisations.test.ts # Organisations router tests
+├── billing.test.ts       # Billing router tests
+├── integration.test.ts   # Router integration tests
+├── types.test.ts         # Type safety tests
+└── coverage.test.ts      # Coverage analysis
+```
+
+### Running tRPC Tests
+
+**Local:**
+```bash
+cd main/apps/gw-spaces
+yarn test src/server/trpc/__tests__ --run
+```
+
+**CI/CD:**
+```bash
+make ci-test-trpc  # Run tRPC tests via GitHub Actions
+```
+
+### Test Coverage
+- **Unit Tests**: Individual procedure testing
+- **Integration Tests**: Router composition validation
+- **Type Safety**: Compile-time type inference verification
+- **Coverage Report**: Procedure inventory and gap analysis
 
 ## Caching Strategy
 
