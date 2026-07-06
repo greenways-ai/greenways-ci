@@ -58,7 +58,7 @@ jobs:
       - name: Set up Leiningen
         uses: DeLaGuardo/setup-clojure@13.4
         with:
-          lein: 2.13.0
+          lein: latest
 
       - name: Cache Leiningen dependencies
         uses: actions/cache@v4
