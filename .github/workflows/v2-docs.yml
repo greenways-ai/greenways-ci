@@ -4,62 +4,23 @@ on:
   repository_dispatch:
     types: [v2-changed]
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: greenways-ai/v2 branch, tag, or SHA
-        required: true
-        default: main
-      publish:
-        description: Publish to GitHub Pages
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
-concurrency:
-  group: v2-docs-${{ github.event.client_payload.sha || inputs.source_ref || 'manual' }}
-  cancel-in-progress: true
-
-env:
-  NODE_VERSION: '22'
-
 jobs:
   build:
-    name: Build Docusaurus
     runs-on: ubuntu-latest
-    outputs:
-      publish: ${{ steps.source.outputs.publish }}
     steps:
-      - name: Resolve source revision
+      - name: Resolve source
         id: source
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-          PAYLOAD_REF: ${{ github.event.client_payload.ref }}
-          PAYLOAD_BASE_REF: ${{ github.event.client_payload.base_ref }}
-          INPUT_REF: ${{ inputs.source_ref }}
-          INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
-          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
-            REF="${PAYLOAD_SHA:-$PAYLOAD_REF}"
-            if [ "$PAYLOAD_REF" = "main" ] || [ "$PAYLOAD_BASE_REF" = "" -a "$PAYLOAD_REF" = "refs/heads/main" ]; then
-              PUBLISH=true
-            else
-              PUBLISH=false
-            fi
-          else
-            REF="${INPUT_REF:-main}"
-            PUBLISH="${INPUT_PUBLISH:-false}"
-          fi
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.client_payload.sha || 'main' }}" >> "$GITHUB_OUTPUT"
+          echo "publish=${{ github.event.client_payload.ref == 'main' }}" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout v2 documentation source
+      - name: Checkout v2
         uses: actions/checkout@v4
         with:
           repository: greenways-ai/v2
@@ -70,44 +31,38 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: v2/docs-gen/package-lock.json
+          node-version: '22'
 
-      - name: Install documentation dependencies
+      - name: Install and build
         working-directory: v2/docs-gen
-        run: npm ci
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
 
-      - name: Build documentation
-        working-directory: v2/docs-gen
-        run: npm run build
-
-      - name: Upload build for inspection
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: v2-docs-${{ steps.source.outputs.ref }}
+          name: v2-docs-build
           path: v2/docs-gen/build
-          retention-days: 14
 
-      - name: Configure GitHub Pages
+      - name: Configure Pages
         if: steps.source.outputs.publish == 'true'
         uses: actions/configure-pages@v5
 
-      - name: Upload GitHub Pages artifact
+      - name: Upload Pages artifact
         if: steps.source.outputs.publish == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: v2/docs-gen/build
 
   deploy:
-    name: Publish GitHub Pages
-    if: needs.build.outputs.publish == 'true'
     needs: build
+    if: github.event.client_payload.ref == 'main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy documentation
+      - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
