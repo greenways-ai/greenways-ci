@@ -73,13 +73,33 @@ jobs:
         with:
           version: latest
 
+      - name: Remove unavailable local-only Lein plugin
+        working-directory: v2/backend
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('project.clj')
+          source = path.read_text()
+          updated, count = re.subn(
+              r'\s*\[lein-mcp\s+"0\.1\.0-SNAPSHOT"\]',
+              '',
+              source,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Expected one lein-mcp 0.1.0-SNAPSHOT plugin entry')
+          path.write_text(updated)
+          PY
+
       - name: Compile backend
         id: compile
         continue-on-error: true
         working-directory: v2/backend
         run: |
           set -o pipefail
-          lein with-profile -dev check 2>&1 | tee lein-check.log
+          lein check 2>&1 | tee lein-check.log
 
       - name: Run gwdb tests
         id: gwdb
@@ -87,7 +107,7 @@ jobs:
         working-directory: v2/backend
         run: |
           set -o pipefail
-          lein with-profile -dev test :in gwdb 2>&1 | tee gwdb-test.log
+          lein test :in gwdb 2>&1 | tee gwdb-test.log
 
       - name: Upload backend diagnostics
         if: always()
