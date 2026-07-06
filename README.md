@@ -15,8 +15,8 @@ greenways-ai/v2
 greenways-ai/greenways-ci
   |
   +--> checkout exact source SHA
-  +--> provision services and toolchains
-  +--> compile and test
+  +--> install the required toolchain
+  +--> run source-owned compile and test commands
   +--> upload diagnostics
   +--> summarize the resolved revision
 ```
@@ -39,16 +39,15 @@ Current stages:
 
 1. check out `greenways-ai/v2` at the requested revision
 2. record the resolved commit SHA
-3. start the local Supabase project
-4. copy `backend/.env.sample-local` to `backend/.env`
-5. restore the Maven dependency cache
-6. run `lein check`
-7. run `lein test :in gwdb`
-8. upload compile and test logs
-9. stop Supabase
-10. fail the run when compilation or tests fail
+3. install Java 21, Leiningen, and the Supabase CLI
+4. run `lein check` from `v2/backend`
+5. run `lein test :in gwdb` from `v2/backend`
+6. upload compile and test logs
+7. fail the run when compilation or tests fail
 
-The backend runs with Java 21 and Leiningen 2.13 in the official Clojure container image.
+The workflow does **not** start or stop Supabase directly. Database-backed tests use the source-owned `gw-dev` scaffold under `backend/docker/gw-dev`, and that scaffold owns its service lifecycle and test configuration.
+
+The backend runs directly on the GitHub-hosted runner so the test scaffold can invoke the installed Supabase and Docker CLIs.
 
 ## Dispatch payload
 
@@ -66,7 +65,7 @@ The notifier in `greenways-ai/v2` sends a payload equivalent to:
 }
 ```
 
-The central workflow currently uses `sha` as the checkout ref and records the resolved value in the run summary.
+The central workflow uses `sha` as the checkout ref and records the resolved value in the run summary.
 
 ## Manual validation
 
@@ -102,16 +101,16 @@ v2/backend/lein-check.log
 v2/backend/gwdb-test.log
 ```
 
-Artifacts are retained for 14 days. Compilation and tests are executed as separate steps so both logs can be collected during baseline stabilization.
+Artifacts are retained for 14 days. Compilation and tests are separate steps so both logs are collected during baseline stabilization.
 
 When investigating a failure, verify in this order:
 
 1. requested and resolved source SHA
 2. source checkout and submodules
-3. local Supabase startup
-4. backend environment file
-5. dependency resolution
-6. compilation output
+3. Java, Leiningen, Supabase CLI, and Docker availability
+4. dependency resolution
+5. compilation output
+6. `gw-dev` scaffold startup output from the tests
 7. failing `gwdb` namespace or fact
 
 ## Legacy workflows
@@ -130,6 +129,7 @@ New stages should follow these rules:
 
 - always check out the exact notified source revision
 - keep source repository workflows limited to notification
+- let source-owned test scaffolds manage their own services when available
 - use immutable dependency installation where supported
 - keep pull-request jobs free of publishing or production credentials
 - upload useful failure diagnostics
