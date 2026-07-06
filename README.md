@@ -14,11 +14,12 @@ greenways-ai/v2
   v
 greenways-ai/greenways-ci
   |
-  +--> checkout exact source SHA
-  +--> provision services and toolchains
-  +--> compile and test
+  +--> checkout exact v2 source SHA
+  +--> checkout foundation-base beside v2
+  +--> run the shared infra-foundation-dev:ci image
+  +--> call v2 make deps-checkouts
+  +--> run source-owned compile and test commands
   +--> upload diagnostics
-  +--> summarize the resolved revision
 ```
 
 The source SHA is the synchronization contract. A central workflow must never replace a supplied SHA with the current tip of `main`.
@@ -38,17 +39,40 @@ Triggers:
 Current stages:
 
 1. check out `greenways-ai/v2` at the requested revision
-2. record the resolved commit SHA
-3. start the local Supabase project
-4. copy `backend/.env.sample-local` to `backend/.env`
-5. restore the Maven dependency cache
-6. run `lein check`
-7. run `lein test :in gwdb`
-8. upload compile and test logs
-9. stop Supabase
+2. check out `zcaudate-xyz/foundation-base` beside `v2`
+3. record both resolved commit SHAs
+4. pull `ghcr.io/zcaudate-xyz/infra-foundation-dev:ci`
+5. mount the workspace and Docker socket into the shared CI image
+6. run `make deps-checkouts` from `v2`
+7. run `lein check` from `v2/backend`
+8. run `lein test :in gwdb` from `v2/backend`
+9. upload compile and test logs
 10. fail the run when compilation or tests fail
 
-The backend runs with Java 21 and Leiningen 2.13 in the official Clojure container image.
+The shared image supplies Java, Leiningen, Docker, and Supabase CLI `2.40.7`. Central CI does not install those tools independently.
+
+The workflow does **not** start or stop Supabase directly. Database-backed tests use the source-owned `gw-dev` scaffold under `backend/docker/gw-dev`, and that scaffold owns its service lifecycle and test configuration.
+
+The Docker socket is mounted into the CI container and the workspace is mounted at the same absolute path. This allows the scaffold's bundled Supabase CLI to start Docker services whose files live in the checked-out `v2` workspace.
+
+## Dependency checkout convention
+
+`v2` owns dependency wiring through:
+
+```bash
+make deps-checkouts
+```
+
+This follows the `statstrade-core` convention. The central repository checks out dependency repositories beside the project, while the project creates its own Leiningen `checkouts/` links. Central CI must not rewrite `project.clj` or add repository-specific source paths.
+
+For the current backend pipeline:
+
+```text
+workspace/
+├── foundation-base/
+└── v2/
+    └── backend/checkouts/foundation-base -> workspace/foundation-base
+```
 
 ## Dispatch payload
 
@@ -66,7 +90,7 @@ The notifier in `greenways-ai/v2` sends a payload equivalent to:
 }
 ```
 
-The central workflow currently uses `sha` as the checkout ref and records the resolved value in the run summary.
+The central workflow uses `sha` as the checkout ref and records the resolved value in the run summary.
 
 ## Manual validation
 
@@ -90,6 +114,7 @@ It needs narrowly scoped permissions for:
 
 - `greenways-ai/v2`: dispatch an event to `greenways-ai/greenways-ci`
 - `greenways-ai/greenways-ci`: read the requested private `greenways-ai/v2` revision
+- `zcaudate-xyz/foundation-base`: read the dependency source checkout when authentication is required
 
 Prefer a GitHub App or fine-grained token restricted to these repositories. Publishing and deployment credentials should be stored separately in protected environments.
 
@@ -102,17 +127,18 @@ v2/backend/lein-check.log
 v2/backend/gwdb-test.log
 ```
 
-Artifacts are retained for 14 days. Compilation and tests are executed as separate steps so both logs can be collected during baseline stabilization.
+Artifacts are retained for 14 days. Compilation and tests are separate steps so both logs are collected during baseline stabilization.
 
 When investigating a failure, verify in this order:
 
-1. requested and resolved source SHA
-2. source checkout and submodules
-3. local Supabase startup
-4. backend environment file
-5. dependency resolution
+1. requested and resolved `v2` SHA
+2. resolved `foundation-base` SHA
+3. shared CI image pull
+4. `make deps-checkouts` output and symlink target
+5. Docker socket and host networking
 6. compilation output
-7. failing `gwdb` namespace or fact
+7. `gw-dev` scaffold startup output
+8. failing `gwdb` namespace or fact
 
 ## Legacy workflows
 
@@ -130,10 +156,12 @@ New stages should follow these rules:
 
 - always check out the exact notified source revision
 - keep source repository workflows limited to notification
-- use immutable dependency installation where supported
+- use project-owned dependency checkout commands
+- reuse the shared `infra-foundation-dev:ci` environment where appropriate
+- let source-owned test scaffolds manage their own services
 - keep pull-request jobs free of publishing or production credentials
 - upload useful failure diagnostics
-- write the resolved source SHA into the run summary
+- write resolved source and dependency SHAs into the run summary
 - separate validation, publishing, and deployment permissions
 
 Recommended next stages:
@@ -150,6 +178,9 @@ Recommended next stages:
 Current Greenways v2 commands expected by central CI:
 
 ```bash
+# Dependency checkouts
+make deps-checkouts
+
 # Backend
 cd backend
 lein check
