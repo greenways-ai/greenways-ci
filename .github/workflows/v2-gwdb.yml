@@ -25,6 +25,7 @@ concurrency:
 env:
   SOURCE_REPOSITORY: greenways-ai/v2
   SOURCE_REF: ${{ github.event.client_payload.sha || inputs.source_ref || 'main' }}
+  CI_IMAGE: ghcr.io/zcaudate-xyz/infra-foundation-dev:ci
 
 jobs:
   gwdb:
@@ -41,113 +42,48 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: v2
 
-      - name: Record source revision
+      - name: Check out Foundation dependency source
+        uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          token: ${{ secrets.GH_TOKEN }}
+          path: foundation-base
+
+      - name: Record source revisions
         id: source
-        working-directory: v2
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          source_sha=$(git -C v2 rev-parse HEAD)
+          foundation_sha=$(git -C foundation-base rev-parse HEAD)
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "foundation_sha=$foundation_sha" >> "$GITHUB_OUTPUT"
           echo "ref=${SOURCE_REF}" >> "$GITHUB_OUTPUT"
-          git show --no-patch --format='Source commit: %H%nSubject: %s'
+          git -C v2 show --no-patch --format='Source commit: %H%nSubject: %s'
+          git -C foundation-base show --no-patch --format='Foundation commit: %H%nSubject: %s'
 
-      - name: Check out pinned Foundation modules
-        working-directory: v2
-        run: |
-          git config submodule.ref/foundation.url https://github.com/zcaudate-xyz/foundation-base.git
-          git submodule update --init --depth 1 ref/foundation
-          git -C ref/foundation show --no-patch --format='Foundation commit: %H%nSubject: %s'
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Leiningen
-        uses: DeLaGuardo/setup-clojure@13.4
-        with:
-          lein: latest
-
-      - name: Cache Leiningen dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: v2-lein-${{ runner.os }}-${{ hashFiles('v2/backend/project.clj', 'v2/ref/foundation/project.clj') }}
-          restore-keys: |
-            v2-lein-${{ runner.os }}-
-
-      - name: Install Foundation modules
-        id: foundation
-        continue-on-error: true
-        working-directory: v2/ref/foundation
-        run: |
-          set -o pipefail
-          lein install 2>&1 | tee foundation-install.log
-
-      - name: Set up Supabase CLI for the gw-dev test scaffold
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Prepare backend for central CI
-        working-directory: v2/backend
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('project.clj')
-          source = path.read_text()
-
-          source, plugin_count = re.subn(
-              r'\s*\[lein-mcp\s+"0\.1\.0-SNAPSHOT"\]',
-              '',
-              source,
-              count=1,
-          )
-
-          source, source_path_count = re.subn(
-              r':source-paths\s+\["src"\s+"src-mcp"\s+"src-unsafe"\]',
-              ':source-paths ["src" "src-mcp" "src-unsafe"\n'
-              '                 "../ref/foundation/src"\n'
-              '                 "../ref/foundation/src-lang"\n'
-              '                 "../ref/foundation/src-extra"]',
-              source,
-              count=1,
-          )
-
-          source, resource_path_count = re.subn(
-              r':resource-paths\s+\["resources"\s+"src"\s+"test"\]',
-              ':resource-paths ["resources" "src" "test"\n'
-              '                   "../ref/foundation/resources"\n'
-              '                   "../ref/foundation/src-build"]',
-              source,
-              count=1,
-          )
-
-          if (plugin_count, source_path_count, resource_path_count) != (1, 1, 1):
-              raise SystemExit(
-                  'Unexpected project.clj structure: '
-                  f'plugin={plugin_count}, source={source_path_count}, resource={resource_path_count}'
-              )
-
-          path.write_text(source)
-          PY
+      - name: Pull shared CI image
+        run: docker pull "$CI_IMAGE"
 
       - name: Compile backend
         id: compile
         continue-on-error: true
-        working-directory: v2/backend
         run: |
-          set -o pipefail
-          lein check 2>&1 | tee lein-check.log
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            "$CI_IMAGE" \
+            bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein check 2>&1 | tee lein-check.log'
 
       - name: Run gwdb tests
         id: gwdb
         continue-on-error: true
-        working-directory: v2/backend
         run: |
-          set -o pipefail
-          lein test :in gwdb 2>&1 | tee gwdb-test.log
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            "$CI_IMAGE" \
+            bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein test :in gwdb 2>&1 | tee gwdb-test.log'
 
       - name: Upload backend diagnostics
         if: always()
@@ -155,7 +91,6 @@ jobs:
         with:
           name: v2-gwdb-${{ steps.source.outputs.sha }}
           path: |
-            v2/ref/foundation/foundation-install.log
             v2/backend/lein-check.log
             v2/backend/gwdb-test.log
           if-no-files-found: warn
@@ -164,7 +99,6 @@ jobs:
       - name: Write run summary
         if: always()
         env:
-          FOUNDATION_RESULT: ${{ steps.foundation.outcome }}
           COMPILE_RESULT: ${{ steps.compile.outcome }}
           GWDB_RESULT: ${{ steps.gwdb.outcome }}
         run: |
@@ -174,20 +108,21 @@ jobs:
             echo "- Repository: $SOURCE_REPOSITORY"
             echo "- Requested ref: $SOURCE_REF"
             echo "- Resolved SHA: ${{ steps.source.outputs.sha }}"
-            echo "- Foundation install: $FOUNDATION_RESULT"
+            echo "- Foundation SHA: ${{ steps.source.outputs.foundation_sha }}"
+            echo "- CI image: $CI_IMAGE"
             echo "- Backend compile: $COMPILE_RESULT"
             echo "- gwdb tests: $GWDB_RESULT"
+            echo '- Dependencies: prepared by v2 make deps-checkouts'
             echo '- Database lifecycle: owned by the gw-dev test scaffold'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce dependency, compile, and test results
+      - name: Enforce compile and test results
         if: always()
         env:
-          FOUNDATION_RESULT: ${{ steps.foundation.outcome }}
           COMPILE_RESULT: ${{ steps.compile.outcome }}
           GWDB_RESULT: ${{ steps.gwdb.outcome }}
         run: |
-          if [[ "$FOUNDATION_RESULT" != success || "$COMPILE_RESULT" != success || "$GWDB_RESULT" != success ]]; then
-            echo 'Foundation installation, backend compilation, or gwdb tests failed.' >&2
+          if [[ "$COMPILE_RESULT" != success || "$GWDB_RESULT" != success ]]; then
+            echo 'Backend compilation or gwdb tests failed.' >&2
             exit 1
           fi
