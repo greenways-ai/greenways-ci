@@ -79,7 +79,7 @@ jobs:
         working-directory: v2/backend
         run: |
           set -o pipefail
-          lein check 2>&1 | tee lein-check.log
+          lein with-profile -dev check 2>&1 | tee lein-check.log
 
       - name: Run gwdb tests
         id: gwdb
@@ -87,7 +87,7 @@ jobs:
         working-directory: v2/backend
         run: |
           set -o pipefail
-          lein test :in gwdb 2>&1 | tee gwdb-test.log
+          lein with-profile -dev test :in gwdb 2>&1 | tee gwdb-test.log
 
       - name: Upload backend diagnostics
         if: always()
