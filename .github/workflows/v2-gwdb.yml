@@ -40,7 +40,6 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           token: ${{ secrets.GH_TOKEN }}
           path: v2
-          submodules: recursive
 
       - name: Record source revision
         id: source
