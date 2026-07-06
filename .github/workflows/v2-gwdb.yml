@@ -54,13 +54,19 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-          cache: lein
-          cache-dependency-path: v2/backend/project.clj
 
       - name: Set up Leiningen
         uses: DeLaGuardo/setup-clojure@13.4
         with:
           lein: 2.13.0
+
+      - name: Cache Leiningen dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: v2-lein-${{ runner.os }}-${{ hashFiles('v2/backend/project.clj') }}
+          restore-keys: |
+            v2-lein-${{ runner.os }}-
 
       - name: Set up Supabase CLI for the gw-dev test scaffold
         uses: supabase/setup-cli@v1
