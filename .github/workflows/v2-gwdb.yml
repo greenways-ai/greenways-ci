@@ -60,6 +60,13 @@ jobs:
           git -C v2 show --no-patch --format='Source commit: %H%nSubject: %s'
           git -C foundation-base show --no-patch --format='Foundation commit: %H%nSubject: %s'
 
+      - name: Log into GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+
       - name: Pull shared CI image
         run: docker pull "$CI_IMAGE"
 
