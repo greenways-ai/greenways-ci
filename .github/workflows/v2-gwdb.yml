@@ -14,7 +14,6 @@ on:
     paths:
       - '.github/workflows/v2-gwdb.yml'
       - 'README.md'
-      - 'archive/workflows/legacy-v2-monorepo/README.md'
 
 permissions:
   contents: read
@@ -26,7 +25,6 @@ concurrency:
 env:
   SOURCE_REPOSITORY: greenways-ai/v2
   SOURCE_REF: ${{ github.event.client_payload.sha || inputs.source_ref || 'main' }}
-  CLOJURE_IMAGE: clojure:temurin-21-lein-2.13.0-bookworm
 
 jobs:
   gwdb:
@@ -52,55 +50,39 @@ jobs:
           echo "ref=${SOURCE_REF}" >> "$GITHUB_OUTPUT"
           git show --no-patch --format='Source commit: %H%nSubject: %s'
 
-      - name: Set up Supabase CLI
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: lein
+          cache-dependency-path: v2/backend/project.clj
+
+      - name: Set up Leiningen
+        uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          lein: 2.13.0
+
+      - name: Set up Supabase CLI for the gw-dev test scaffold
         uses: supabase/setup-cli@v1
         with:
           version: latest
 
-      - name: Start local Supabase
-        working-directory: v2/docker/supabase
-        run: |
-          supabase start
-          supabase status
-
-      - name: Prepare backend environment
-        working-directory: v2/backend
-        run: cp .env.sample-local .env
-
-      - name: Cache Clojure dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: v2-gwdb-${{ runner.os }}-${{ hashFiles('v2/backend/project.clj', 'v2/backend/deps.edn') }}
-          restore-keys: |
-            v2-gwdb-${{ runner.os }}-
-
-      - name: Prepare Maven cache mount
-        run: mkdir -p "$HOME/.m2/repository"
-
       - name: Compile backend
         id: compile
         continue-on-error: true
+        working-directory: v2/backend
         run: |
-          docker run --rm --network host \
-            -e CI=true \
-            -v "$GITHUB_WORKSPACE/v2:/workspace" \
-            -v "$HOME/.m2:/root/.m2" \
-            -w /workspace/backend \
-            "$CLOJURE_IMAGE" \
-            bash -lc 'set -o pipefail; lein check 2>&1 | tee lein-check.log'
+          set -o pipefail
+          lein check 2>&1 | tee lein-check.log
 
       - name: Run gwdb tests
         id: gwdb
         continue-on-error: true
+        working-directory: v2/backend
         run: |
-          docker run --rm --network host \
-            -e CI=true \
-            -v "$GITHUB_WORKSPACE/v2:/workspace" \
-            -v "$HOME/.m2:/root/.m2" \
-            -w /workspace/backend \
-            "$CLOJURE_IMAGE" \
-            bash -lc 'set -o pipefail; lein test :in gwdb 2>&1 | tee gwdb-test.log'
+          set -o pipefail
+          lein test :in gwdb 2>&1 | tee gwdb-test.log
 
       - name: Upload backend diagnostics
         if: always()
@@ -112,11 +94,6 @@ jobs:
             v2/backend/gwdb-test.log
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Stop local Supabase
-        if: always()
-        working-directory: v2/docker/supabase
-        run: supabase stop --no-backup
 
       - name: Write run summary
         if: always()
@@ -132,6 +109,7 @@ jobs:
             echo "- Resolved SHA: ${{ steps.source.outputs.sha }}"
             echo "- Backend compile: $COMPILE_RESULT"
             echo "- gwdb tests: $GWDB_RESULT"
+            echo '- Database lifecycle: owned by the gw-dev test scaffold'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce compile and test results
