@@ -4,21 +4,43 @@ on:
   repository_dispatch:
     types: [v2-changed]
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: v2 branch, tag, or commit SHA to build
+        required: true
+        default: main
+        type: string
+      publish_pages:
+        description: Publish the built Docusaurus site to GitHub Pages
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.source.outputs.publish }}
     steps:
       - name: Resolve source
         id: source
         run: |
-          echo "ref=${{ github.event.client_payload.sha || 'main' }}" >> "$GITHUB_OUTPUT"
-          echo "publish=${{ github.event.client_payload.ref == 'main' }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "ref=${{ github.event.client_payload.sha }}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ github.event.client_payload.ref == 'main' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ inputs.publish_pages }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Checkout v2
         uses: actions/checkout@v4
@@ -57,7 +79,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event.client_payload.ref == 'main'
+    if: needs.build.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
