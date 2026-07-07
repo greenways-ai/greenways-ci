@@ -40,7 +40,7 @@ jobs:
   gwdb:
     name: Compile and run requested gwdb segments
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Resolve correlated request
@@ -200,6 +200,22 @@ jobs:
         if: steps.request.outputs.run-backend == 'true'
         run: docker pull "$CI_IMAGE"
 
+      - name: Prepare persistent Maven repository
+        if: steps.request.outputs.run-backend == 'true'
+        run: mkdir -p "$HOME/.m2"
+
+      - name: Install Foundation modules
+        if: steps.request.outputs.run-backend == 'true'
+        id: foundation
+        continue-on-error: true
+        run: |
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            -v "$HOME/.m2:/root/.m2" \
+            "$CI_IMAGE" \
+            bash -lc 'set -o pipefail; cd foundation-base && lein install 2>&1 | tee foundation-install.log'
+
       - name: Compile backend
         if: steps.request.outputs.run-backend == 'true'
         id: compile
@@ -208,6 +224,7 @@ jobs:
           docker run --rm --network host \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
+            -v "$HOME/.m2:/root/.m2" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
             "$CI_IMAGE" \
             bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein check 2>&1 | tee lein-check.log'
@@ -220,6 +237,7 @@ jobs:
           docker run --rm --network host \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
+            -v "$HOME/.m2:/root/.m2" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
             "$CI_IMAGE" \
             bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein test :in gwdb.core 2>&1 | tee gwdb-core-test.log'
@@ -232,6 +250,7 @@ jobs:
           docker run --rm --network host \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
+            -v "$HOME/.m2:/root/.m2" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
             "$CI_IMAGE" \
             bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein test :in gwdb.rpc 2>&1 | tee gwdb-rpc-test.log'
@@ -242,6 +261,7 @@ jobs:
         with:
           name: v2-gwdb-${{ steps.source.outputs.sha || steps.request.outputs.source-ref }}-${{ github.run_id }}
           path: |
+            foundation-base/foundation-install.log
             v2/backend/lein-check.log
             v2/backend/gwdb-core-test.log
             v2/backend/gwdb-rpc-test.log
@@ -256,6 +276,7 @@ jobs:
           SOURCE_SHA: ${{ steps.request.outputs.source-ref }}
           RUN_CORE: ${{ steps.request.outputs.run-core }}
           RUN_RPC: ${{ steps.request.outputs.run-rpc }}
+          FOUNDATION_RESULT: ${{ steps.foundation.outcome }}
           COMPILE_RESULT: ${{ steps.compile.outcome }}
           CORE_RESULT: ${{ steps.core.outcome }}
           RPC_RESULT: ${{ steps.rpc.outcome }}
@@ -268,14 +289,19 @@ jobs:
             async function report(contextName, requested, testResult) {
               if (!requested) return;
 
+              const foundationPassed = process.env.FOUNDATION_RESULT === 'success';
               const compilePassed = process.env.COMPILE_RESULT === 'success';
               const testPassed = testResult === 'success';
-              const state = compilePassed && testPassed ? 'success' : 'failure';
-              const description = !compilePassed
-                ? 'Backend compilation failed'
-                : testPassed
-                  ? 'Segment tests passed'
-                  : 'Segment tests failed or did not run';
+              const state = foundationPassed && compilePassed && testPassed
+                ? 'success'
+                : 'failure';
+              const description = !foundationPassed
+                ? 'Foundation dependency installation failed'
+                : !compilePassed
+                  ? 'Backend compilation failed'
+                  : testPassed
+                    ? 'Segment tests passed'
+                    : 'Segment tests failed or did not run';
 
               await github.rest.repos.createCommitStatus({
                 owner,
@@ -303,6 +329,7 @@ jobs:
         if: always()
         shell: bash
         env:
+          FOUNDATION_RESULT: ${{ steps.foundation.outcome }}
           COMPILE_RESULT: ${{ steps.compile.outcome }}
           CORE_RESULT: ${{ steps.core.outcome }}
           RPC_RESULT: ${{ steps.rpc.outcome }}
@@ -321,11 +348,13 @@ jobs:
             echo "- pull request: ${{ steps.request.outputs.pr-number || 'n/a' }}"
             echo "- gwdb.core requested: ${{ steps.request.outputs.run-core }}"
             echo "- gwdb.rpc requested: ${{ steps.request.outputs.run-rpc }}"
+            echo "- Foundation install: ${FOUNDATION_RESULT:-skipped}"
             echo "- backend compile: ${COMPILE_RESULT:-skipped}"
             echo "- gwdb.core tests: ${CORE_RESULT:-skipped}"
             echo "- gwdb.rpc tests: ${RPC_RESULT:-skipped}"
             echo "- CI image: $CI_IMAGE"
-            echo '- Dependencies: prepared by v2 make deps-checkouts'
+            echo '- Dependency checkouts: prepared by v2 make deps-checkouts'
+            echo '- Foundation artifacts: installed into the shared Maven mount'
             echo '- Database lifecycle: owned by the gw-dev test scaffold'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -335,11 +364,17 @@ jobs:
         env:
           RUN_CORE: ${{ steps.request.outputs.run-core }}
           RUN_RPC: ${{ steps.request.outputs.run-rpc }}
+          FOUNDATION_RESULT: ${{ steps.foundation.outcome }}
           COMPILE_RESULT: ${{ steps.compile.outcome }}
           CORE_RESULT: ${{ steps.core.outcome }}
           RPC_RESULT: ${{ steps.rpc.outcome }}
         run: |
           failed=false
+
+          if [[ "$FOUNDATION_RESULT" != "success" ]]; then
+            echo 'Foundation module installation failed.' >&2
+            failed=true
+          fi
 
           if [[ "$COMPILE_RESULT" != "success" ]]; then
             echo 'Backend compilation failed.' >&2

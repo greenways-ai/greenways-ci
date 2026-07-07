@@ -123,21 +123,31 @@ jobs:
         id: install
         continue-on-error: true
         working-directory: v2/docs-gen
-        run: npm install --no-audit --no-fund
+        shell: bash
+        run: |
+          set -o pipefail
+          npm install --no-audit --no-fund 2>&1 | tee npm-install.log
 
       - name: Build documentation
         id: docs
         if: steps.install.outcome == 'success'
         continue-on-error: true
         working-directory: v2/docs-gen
-        run: npm run build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee docusaurus-build.log
 
-      - name: Upload build for inspection
-        if: steps.docs.outcome == 'success'
+      - name: Upload documentation diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v2-docs-${{ steps.source.outputs.ref }}-${{ github.run_id }}
-          path: v2/docs-gen/build
+          path: |
+            v2/docs-gen/npm-install.log
+            v2/docs-gen/docusaurus-build.log
+            v2/docs-gen/build
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Configure GitHub Pages
@@ -191,6 +201,7 @@ jobs:
             echo "- install: ${{ steps.install.outcome || 'not run' }}"
             echo "- build: ${{ steps.docs.outcome || 'not run' }}"
             echo "- publish requested: ${{ steps.source.outputs.publish }}"
+            echo '- Diagnostics: npm-install.log and docusaurus-build.log'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce documentation result
