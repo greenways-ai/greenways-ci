@@ -175,18 +175,52 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install and build Docusaurus
+      - name: Install and build published documentation
         id: build
         continue-on-error: true
         working-directory: v2/docs-gen
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            fonts-inter \
+            fonts-roboto \
+            latexmk \
+            texlive-fonts-recommended \
+            texlive-latex-extra \
+            texlive-xetex
+          fc-cache -f
+
+          make -C ../docs/business-plan 2>&1 | tee business-plan-build.log
+
+          document_root="static/documents/business-plan"
+          mkdir -p "$document_root/case-studies"
+          install -m 0644 \
+            ../docs/business-plan/business-plan.pdf \
+            "$document_root/business-plan.pdf"
+
+          shopt -s nullglob
+          case_study_pdfs=(../docs/business-plan/case-studies/*.pdf)
+          test "${#case_study_pdfs[@]}" -gt 0
+          install -m 0644 "${case_study_pdfs[@]}" "$document_root/case-studies/"
+
+          test -s "$document_root/business-plan.pdf"
+          for pdf in "${case_study_pdfs[@]}"; do
+            test -s "$document_root/case-studies/$(basename "$pdf")"
+          done
+
           npm install --no-audit --no-fund 2>&1 | tee npm-install.log
           npm run build 2>&1 | tee docusaurus-build.log
+
           test -f build/index.html
           test -d build/assets/js
           test -d build/assets/css
+          test -s build/documents/business-plan/business-plan.pdf
+          for pdf in "${case_study_pdfs[@]}"; do
+            test -s "build/documents/business-plan/case-studies/$(basename "$pdf")"
+          done
 
       - name: Upload Docusaurus diagnostics
         if: always()
@@ -194,8 +228,10 @@ jobs:
         with:
           name: v2-docusaurus-${{ steps.request.outputs.ref }}-${{ github.run_id }}
           path: |
+            v2/docs-gen/business-plan-build.log
             v2/docs-gen/npm-install.log
             v2/docs-gen/docusaurus-build.log
+            v2/docs-gen/static/documents/business-plan
             v2/docs-gen/build
           if-no-files-found: warn
           retention-days: 14
