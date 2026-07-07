@@ -1,10 +1,14 @@
 # V2 documentation publishing
 
-The `V2 Documentation` workflow builds `greenways-ai/v2/docs-gen` from the exact source revision supplied by the existing `v2-changed` repository-dispatch event.
+The `Greenways v2 CI` workflow builds `greenways-ai/v2/docs-gen` from the exact
+source revision supplied by a `v2-ci-requested` repository-dispatch event.
+Documentation is a conditional job inside the shared central run, rather than a
+separate top-level workflow.
 
-- Pull-request and feature-branch dispatches build and upload an artifact for review.
+- Pull-request and feature-branch dispatches build and upload diagnostics and an artifact for review.
 - A dispatch for `main` builds and publishes the site to the `greenways-ci` GitHub Pages environment.
-- Manual dispatch is available for validation or recovery.
+- Manual dispatch can independently enable documentation and publishing.
+- Backend-only requests do not allocate a documentation runner.
 
 Required repository configuration:
 
@@ -12,4 +16,5 @@ Required repository configuration:
 2. GitHub Pages must use GitHub Actions as its source.
 3. The `github-pages` environment may require reviewer approval if desired.
 
-The Docusaurus site links each page back to its source in `greenways-ai/v2`, while plan approval remains recorded in the source pull request.
+The Docusaurus site links each page back to its source in `greenways-ai/v2`,
+while plan approval remains recorded in the source pull request.
