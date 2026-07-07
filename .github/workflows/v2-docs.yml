@@ -2,28 +2,114 @@ name: V2 Documentation
 
 on:
   repository_dispatch:
-    types: [v2-changed]
+    types: [v2-ci-requested, v2-changed]
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: greenways-ai/v2 branch, tag, or SHA
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Publish to GitHub Pages
+        required: true
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/v2-docs.yml'
+      - 'docs/v2-documentation-publishing.md'
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+concurrency:
+  group: v2-docs-${{ github.event.client_payload.correlation_id || github.event.client_payload.source_sha || github.event.client_payload.sha || inputs.source_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build Docusaurus
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event.action == 'v2-changed' || github.event.client_payload.segments.docs == true
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.source.outputs.publish }}
     steps:
-      - name: Resolve source
+      - name: Resolve source revision
         id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.source_repository || github.event.client_payload.repository }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.source_sha || github.event.client_payload.sha }}
+          PAYLOAD_REF: ${{ github.event.client_payload.source_ref || github.event.client_payload.ref }}
+          PAYLOAD_CORRELATION: ${{ github.event.client_payload.correlation_id }}
+          PAYLOAD_SOURCE_RUN_URL: ${{ github.event.client_payload.source_run_url }}
+          INPUT_REF: ${{ inputs.source_ref }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
-          echo "ref=${{ github.event.client_payload.sha || 'main' }}" >> "$GITHUB_OUTPUT"
-          echo "publish=${{ github.event.client_payload.ref == 'main' }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
-      - name: Checkout v2
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            repository="greenways-ai/v2"
+            ref="${INPUT_REF:-main}"
+            publish="${INPUT_PUBLISH:-false}"
+            correlation_id="manual:${ref}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+            source_run_url=""
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            repository="greenways-ai/v2"
+            ref="main"
+            publish=false
+            correlation_id="central-pr:${GITHUB_SHA}:${GITHUB_RUN_ID}"
+            source_run_url=""
+          else
+            repository="${PAYLOAD_REPOSITORY:-greenways-ai/v2}"
+            ref="${PAYLOAD_SHA:-main}"
+            correlation_id="${PAYLOAD_CORRELATION:-legacy:${ref}:${GITHUB_RUN_ID}}"
+            source_run_url="$PAYLOAD_SOURCE_RUN_URL"
+
+            if [[ "$PAYLOAD_REF" == "main" ]]; then
+              publish=true
+            else
+              publish=false
+            fi
+          fi
+
+          {
+            echo "repository=$repository"
+            echo "ref=$ref"
+            echo "publish=$publish"
+            echo "correlation-id=$correlation_id"
+            echo "source-run-url=$source_run_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Link source documentation check
+        if: github.event_name == 'repository_dispatch'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          SOURCE_SHA: ${{ steps.source.outputs.ref }}
+          CENTRAL_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha: process.env.SOURCE_SHA,
+              state: 'pending',
+              context: 'greenways-ci/docs',
+              description: 'Building documentation in central CI',
+              target_url: process.env.CENTRAL_RUN_URL,
+            });
+
+      - name: Checkout v2 documentation source
         uses: actions/checkout@v4
         with:
-          repository: greenways-ai/v2
+          repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.ref }}
           token: ${{ secrets.GH_TOKEN }}
           path: v2
@@ -33,36 +119,100 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install and build
+      - name: Install documentation dependencies
+        id: install
+        continue-on-error: true
         working-directory: v2/docs-gen
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
+        run: npm install --no-audit --no-fund
 
-      - name: Upload build artifact
+      - name: Build documentation
+        id: docs
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        working-directory: v2/docs-gen
+        run: npm run build
+
+      - name: Upload build for inspection
+        if: steps.docs.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: v2-docs-build
+          name: v2-docs-${{ steps.source.outputs.ref }}-${{ github.run_id }}
           path: v2/docs-gen/build
+          retention-days: 14
 
-      - name: Configure Pages
-        if: steps.source.outputs.publish == 'true'
+      - name: Configure GitHub Pages
+        if: steps.source.outputs.publish == 'true' && steps.docs.outcome == 'success'
         uses: actions/configure-pages@v5
 
-      - name: Upload Pages artifact
-        if: steps.source.outputs.publish == 'true'
+      - name: Upload GitHub Pages artifact
+        if: steps.source.outputs.publish == 'true' && steps.docs.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           path: v2/docs-gen/build
 
+      - name: Report source documentation result
+        if: always() && github.event_name == 'repository_dispatch'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          SOURCE_SHA: ${{ steps.source.outputs.ref }}
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          DOCS_RESULT: ${{ steps.docs.outcome }}
+          CENTRAL_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            const passed =
+              process.env.INSTALL_RESULT === 'success' &&
+              process.env.DOCS_RESULT === 'success';
+
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha: process.env.SOURCE_SHA,
+              state: passed ? 'success' : 'failure',
+              context: 'greenways-ci/docs',
+              description: passed
+                ? 'Documentation build passed'
+                : 'Documentation build failed',
+              target_url: process.env.CENTRAL_RUN_URL,
+            });
+
+      - name: Write documentation summary
+        if: always()
+        run: |
+          {
+            echo '## V2 documentation'
+            echo
+            echo "- correlation: \`${{ steps.source.outputs.correlation-id }}\`"
+            echo "- source ref: \`${{ steps.source.outputs.ref }}\`"
+            echo "- source run: ${{ steps.source.outputs.source-run-url || 'manual or central PR' }}"
+            echo "- install: ${{ steps.install.outcome || 'not run' }}"
+            echo "- build: ${{ steps.docs.outcome || 'not run' }}"
+            echo "- publish requested: ${{ steps.source.outputs.publish }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce documentation result
+        if: always()
+        shell: bash
+        env:
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          DOCS_RESULT: ${{ steps.docs.outcome }}
+        run: |
+          if [[ "$INSTALL_RESULT" != "success" || "$DOCS_RESULT" != "success" ]]; then
+            exit 1
+          fi
+
   deploy:
+    name: Publish GitHub Pages
+    if: needs.build.outputs.publish == 'true'
     needs: build
-    if: github.event.client_payload.ref == 'main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy Pages
+      - name: Deploy documentation
         id: deployment
         uses: actions/deploy-pages@v4
