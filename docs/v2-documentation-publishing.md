@@ -11,8 +11,8 @@ separate top-level workflow.
 - Backend-only requests do not allocate a documentation runner.
 
 The retired `Publish Web Main` workflow is unrelated to documentation
-publishing and has been removed with the old application and tRPC reusable
-workflows.
+publishing and has been removed with the old `_Build Application` and `_Test
+tRPC Routers` reusable workflows.
 
 Required repository configuration:
 
