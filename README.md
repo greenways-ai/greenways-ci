@@ -3,7 +3,7 @@
 `greenways-ai/greenways-ci` is the central execution repository for Greenways
 AI projects. Source repositories publish lightweight, correlated requests;
 this repository checks out exact source revisions and runs validation,
-publishing, or deployment workflows.
+publishing, or deployment jobs.
 
 ## Current v2 architecture
 
@@ -17,27 +17,35 @@ greenways-ai/v2
   v
 greenways-ai/greenways-ci
   |
-  +--> segmented gwdb validation
-  +--> documentation build and Pages publishing
-  +--> diagnostics and run summaries
-  +--> source status updates linked to central runs
+  +--> one segmented workflow run
+        +--> gwdb validation, when requested
+        +--> documentation build and publishing, when requested
+        +--> diagnostics and run summaries
+        +--> source status updates linked to the central run
 ```
 
-The source SHA is the synchronization contract. Central workflows must not
-replace a supplied SHA with a moving branch.
+The source SHA is the synchronization contract. Central jobs must not replace a
+supplied SHA with a moving branch.
 
-## Active workflows
+## Active workflow
 
-### Segmented v2 gwdb
+Workflow: `.github/workflows/v2-ci.yml`
 
-Workflow: `.github/workflows/v2-gwdb.yml`
+A single `v2-ci-requested` dispatch creates one central Actions run. The `gwdb`
+and `docs` jobs are selected from the payload's segment flags and can execute in
+parallel. Unrequested jobs are skipped before a runner is allocated.
+
+This replaces the former `v2-gwdb.yml` and `v2-docs.yml` top-level workflows,
+which both subscribed to every dispatch and produced duplicate or no-op entries
+in the Actions history.
 
 The workflow accepts:
 
 - `repository_dispatch` event `v2-ci-requested`
-- legacy `v2-changed` events during migration
-- manual dispatch with independent core and RPC flags
-- pull requests that change the central workflow
+- manual dispatch with independent core, RPC, docs, and publish flags
+- pull requests that change the central workflow or its documentation
+
+### Segmented v2 gwdb
 
 Requested backend work performs:
 
@@ -68,10 +76,8 @@ required by branch protection.
 
 ### V2 documentation
 
-Workflow: `.github/workflows/v2-docs.yml`
-
-The docs workflow runs only when the dispatch requests the docs segment.
-It builds the exact source SHA, uploads the Docusaurus output, and publishes
+The docs job runs only when the dispatch requests the docs segment. It builds
+the exact source SHA, uploads Docusaurus diagnostics and output, and publishes
 GitHub Pages only when the source ref is `main`.
 
 The source context is:
@@ -80,7 +86,7 @@ The source context is:
 greenways-ci/docs
 ```
 
-Manual dispatch accepts both a source ref and an explicit publish flag.
+Manual dispatch accepts a source ref and an explicit publish flag.
 
 ## Correlation
 
@@ -95,9 +101,8 @@ pull-request metadata, a bounded changed-file sample, and requested segments.
 Extended metadata is nested to remain within GitHub's limit of ten top-level
 `client_payload` properties.
 
-Central run summaries include the same correlation ID. Source statuses link
-directly to the corresponding central run, allowing navigation in both
-directions:
+All selected jobs share the same central workflow URL and correlation ID. This
+allows navigation in both directions:
 
 ```text
 v2 commit -> source notification run -> central run
@@ -115,9 +120,9 @@ v2/backend/docker/gw-dev/
 v2/backend/config/scaffold/supabase-gw-dev.edn
 ```
 
-The shared CI container mounts the workspace at the same absolute path,
-mounts the Docker socket, and uses host networking so the scaffold can manage
-its bundled services.
+The shared CI container mounts the workspace at the same absolute path, mounts
+the Docker socket, and uses host networking so the scaffold can manage its
+bundled services.
 
 ## Dependency checkout convention
 
@@ -129,8 +134,8 @@ make deps-checkouts
 ```
 
 Central CI checks out dependency repositories beside the project. The project
-creates its own Leiningen `checkouts/` links. Central workflows must not
-rewrite `project.clj` or add repository-specific source paths.
+creates its own Leiningen `checkouts/` links. Central workflows must not rewrite
+`project.clj` or add repository-specific source paths.
 
 ## Shared environment
 
@@ -184,17 +189,26 @@ repositories and operations.
 
 ## Diagnostics
 
-The backend workflow uploads available files from:
+The backend job uploads available files from:
 
 ```text
+foundation-base/foundation-install.log
 v2/backend/lein-check.log
 v2/backend/gwdb-core-test.log
 v2/backend/gwdb-rpc-test.log
 ```
 
+The docs job uploads:
+
+```text
+v2/docs-gen/npm-install.log
+v2/docs-gen/docusaurus-build.log
+v2/docs-gen/build/
+```
+
 Artifacts are retained for 14 days.
 
-When investigating a failure, verify:
+When investigating a backend failure, verify:
 
 1. correlation ID
 2. requested and resolved source SHA
@@ -207,14 +221,16 @@ When investigating a failure, verify:
 
 ## Legacy workflows
 
-The obsolete monorepo workflows remain documented under:
+Obsolete monorepo workflows remain documented under:
 
 ```text
 archive/workflows/legacy-v2-monorepo/
 ```
 
-They referenced retired applications, package names, and deployment paths.
-Do not restore them directly.
+They referenced retired applications, package names, and deployment paths. Do
+not restore them directly. The retired top-level `v2-gwdb.yml` and
+`v2-docs.yml` workflows were superseded by `v2-ci.yml` and are not archived
+because their job definitions now live in the combined workflow.
 
 ## Next stages
 
