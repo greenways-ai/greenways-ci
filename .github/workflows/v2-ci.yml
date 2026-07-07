@@ -20,10 +20,29 @@ on:
         required: true
         default: true
         type: boolean
+      run_docs:
+        description: Build Docusaurus documentation
+        required: true
+        default: true
+        type: boolean
+      publish_docs:
+        description: Publish Docusaurus to GitHub Pages
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/v2-ci.yml'
+      - '.github/workflows/_v2-gwdb-segment.yml'
+      - 'docs/v2-documentation-publishing.md'
   pull_request:
     paths:
       - '.github/workflows/v2-ci.yml'
       - '.github/workflows/_v2-gwdb-segment.yml'
+      - 'README.md'
+      - 'Makefile'
+      - 'docs/v2-documentation-publishing.md'
 
 permissions:
   contents: read
@@ -76,3 +95,200 @@ jobs:
       artifact_suffix: gwdb-rpc
       report_status: ${{ github.event_name == 'repository_dispatch' }}
     secrets: inherit
+
+  docs:
+    name: Docusaurus pipeline
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_docs) ||
+      github.event.client_payload.segments.docs == true
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.request.outputs.publish }}
+      repository: ${{ steps.request.outputs.repository }}
+      ref: ${{ steps.request.outputs.ref }}
+      report_status: ${{ steps.request.outputs.report_status }}
+
+    steps:
+      - name: Resolve correlated documentation request
+        id: request
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.source_repository }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.source_sha }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.source_ref }}
+          INPUT_REF: ${{ inputs.source_ref }}
+          INPUT_PUBLISH: ${{ inputs.publish_docs }}
+        run: |
+          repository="greenways-ai/v2"
+          ref="main"
+          publish=false
+          report_status=false
+
+          if [[ "$EVENT_NAME" == repository_dispatch ]]; then
+            repository="${PAYLOAD_REPOSITORY:-greenways-ai/v2}"
+            ref="${PAYLOAD_SHA:-main}"
+            report_status=true
+            [[ "$PAYLOAD_BRANCH" == main ]] && publish=true
+          elif [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            ref="${INPUT_REF:-main}"
+            [[ "$INPUT_PUBLISH" == true ]] && publish=true
+          elif [[ "$EVENT_NAME" == push ]]; then
+            publish=true
+          fi
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "report_status=$report_status" >> "$GITHUB_OUTPUT"
+
+      - name: Link source docs check to this run
+        if: steps.request.outputs.report_status == 'true'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ steps.request.outputs.repository }}
+          SOURCE_SHA: ${{ steps.request.outputs.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: process.env.SOURCE_SHA,
+              state: 'pending', context: 'greenways-ci/docs',
+              description: 'Building Docusaurus in central CI',
+              target_url: process.env.RUN_URL,
+            });
+
+      - name: Checkout exact v2 revision
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.request.outputs.repository }}
+          ref: ${{ steps.request.outputs.ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and build Docusaurus
+        id: build
+        continue-on-error: true
+        working-directory: v2/docs-gen
+        shell: bash
+        run: |
+          set -o pipefail
+          npm install --no-audit --no-fund 2>&1 | tee npm-install.log
+          npm run build 2>&1 | tee docusaurus-build.log
+          test -f build/index.html
+          test -d build/assets/js
+          test -d build/assets/css
+
+      - name: Upload Docusaurus diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-docusaurus-${{ steps.request.outputs.ref }}-${{ github.run_id }}
+          path: |
+            v2/docs-gen/npm-install.log
+            v2/docs-gen/docusaurus-build.log
+            v2/docs-gen/build
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Docusaurus Pages artifact
+        if: steps.request.outputs.publish == 'true' && steps.build.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: v2/docs-gen/build
+
+      - name: Report build result when not deploying
+        if: >-
+          always() &&
+          steps.request.outputs.report_status == 'true' &&
+          (steps.request.outputs.publish != 'true' || steps.build.outcome != 'success')
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ steps.request.outputs.repository }}
+          SOURCE_SHA: ${{ steps.request.outputs.ref }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            const passed = process.env.BUILD_RESULT === 'success';
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: process.env.SOURCE_SHA,
+              state: passed ? 'success' : 'failure', context: 'greenways-ci/docs',
+              description: passed ? 'Docusaurus build passed' : 'Docusaurus build failed',
+              target_url: process.env.RUN_URL,
+            });
+
+      - name: Enforce Docusaurus build
+        if: always()
+        env:
+          BUILD_RESULT: ${{ steps.build.outcome }}
+        run: test "$BUILD_RESULT" = success
+
+  deploy-docs:
+    name: Publish Docusaurus to GitHub Pages
+    needs: docs
+    if: needs.docs.result == 'success' && needs.docs.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Verify Pages source is GitHub Actions
+        id: pages_source
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const page = (await github.request(
+              'GET /repos/{owner}/{repo}/pages',
+              {owner: context.repo.owner, repo: context.repo.repo},
+            )).data;
+            if (page.build_type !== 'workflow') {
+              throw new Error(
+                `Pages source is ${page.build_type}; set Settings > Pages > Source to GitHub Actions`,
+              );
+            }
+
+      - name: Configure GitHub Pages metadata
+        uses: actions/configure-pages@v5
+
+      - name: Deploy Docusaurus artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Report Pages deployment result
+        if: always() && needs.docs.outputs.report_status == 'true'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ needs.docs.outputs.repository }}
+          SOURCE_SHA: ${{ needs.docs.outputs.ref }}
+          DEPLOY_RESULT: ${{ steps.deployment.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            const passed = process.env.DEPLOY_RESULT === 'success';
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: process.env.SOURCE_SHA,
+              state: passed ? 'success' : 'failure', context: 'greenways-ci/docs',
+              description: passed
+                ? 'Docusaurus published to GitHub Pages'
+                : 'Docusaurus Pages deployment failed',
+              target_url: process.env.RUN_URL,
+            });
