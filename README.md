@@ -1,208 +1,233 @@
 # Greenways CI
 
-`greenways-ai/greenways-ci` is the central automation repository for Greenways AI projects. Source repositories send lightweight notifications; this repository checks out the exact source revision and runs compilation, tests, packaging, publishing, or deployment.
+`greenways-ai/greenways-ci` is the central execution repository for Greenways
+AI projects. Source repositories publish lightweight, correlated requests;
+this repository checks out exact source revisions and runs validation,
+publishing, or deployment workflows.
 
-The design follows the central-CI pattern used by `statstrade-dev/ci`.
-
-## Architecture
+## Current v2 architecture
 
 ```text
 greenways-ai/v2
   |
-  | repository_dispatch: v2-changed
-  | repository, ref, SHA, event, PR metadata
+  | path detection
+  | source commit statuses
+  | repository_dispatch: v2-ci-requested
+  | correlation ID + exact SHA + segment flags
   v
 greenways-ai/greenways-ci
   |
-  +--> checkout exact v2 source SHA
-  +--> checkout foundation-base beside v2
-  +--> run the shared infra-foundation-dev:ci image
-  +--> call v2 make deps-checkouts
-  +--> run source-owned compile and test commands
-  +--> upload diagnostics
+  +--> segmented gwdb validation
+  +--> documentation build and Pages publishing
+  +--> diagnostics and run summaries
+  +--> source status updates linked to central runs
 ```
 
-The source SHA is the synchronization contract. A central workflow must never replace a supplied SHA with the current tip of `main`.
+The source SHA is the synchronization contract. Central workflows must not
+replace a supplied SHA with a moving branch.
 
-## Active pipeline
+## Active workflows
 
-### Greenways v2 `gwdb`
+### Segmented v2 gwdb
 
 Workflow: `.github/workflows/v2-gwdb.yml`
 
-Triggers:
+The workflow accepts:
 
-- `repository_dispatch` event `v2-changed`
-- manual `workflow_dispatch` with a branch, tag, or commit
-- pull requests that change the central pipeline itself
+- `repository_dispatch` event `v2-ci-requested`
+- legacy `v2-changed` events during migration
+- manual dispatch with independent core and RPC flags
+- pull requests that change the central workflow
 
-Current stages:
+Requested backend work performs:
 
-1. check out `greenways-ai/v2` at the requested revision
-2. check out `zcaudate-xyz/foundation-base` beside `v2`
-3. record both resolved commit SHAs
-4. pull `ghcr.io/zcaudate-xyz/infra-foundation-dev:ci`
-5. mount the workspace and Docker socket into the shared CI image
-6. run `make deps-checkouts` from `v2`
-7. run `lein check` from `v2/backend`
-8. run `lein test :in gwdb` from `v2/backend`
-9. upload compile and test logs
-10. fail the run when compilation or tests fail
+1. exact `greenways-ai/v2` checkout
+2. adjacent `zcaudate-xyz/foundation-base` checkout
+3. source and dependency SHA recording
+4. shared CI image pull
+5. project-owned `make deps-checkouts`
+6. one `lein check`
+7. `lein test :in gwdb.core` when requested
+8. `lein test :in gwdb.rpc` when requested
+9. segment-specific diagnostic artifact upload
+10. commit-status reporting to the source SHA
 
-The shared image supplies Java, Leiningen, Docker, and Supabase CLI `2.40.7`. Central CI does not install those tools independently.
+Core changes also request RPC validation because RPC namespaces depend on core
+database definitions. RPC-only changes do not run the core suite.
 
-The workflow does **not** start or stop Supabase directly. Database-backed tests use the source-owned `gw-dev` scaffold under `backend/docker/gw-dev`, and that scaffold owns its service lifecycle and test configuration.
+The source contexts are:
 
-The Docker socket is mounted into the CI container and the workspace is mounted at the same absolute path. This allows the scaffold's bundled Supabase CLI to start Docker services whose files live in the checked-out `v2` workspace.
+```text
+greenways-ci/gwdb-core
+greenways-ci/gwdb-rpc
+```
+
+Central CI updates only requested contexts. The source workflow reports
+unrequested contexts as successful skips so the contexts can safely be
+required by branch protection.
+
+### V2 documentation
+
+Workflow: `.github/workflows/v2-docs.yml`
+
+The docs workflow runs only when the dispatch requests the docs segment.
+It builds the exact source SHA, uploads the Docusaurus output, and publishes
+GitHub Pages only when the source ref is `main`.
+
+The source context is:
+
+```text
+greenways-ci/docs
+```
+
+Manual dispatch accepts both a source ref and an explicit publish flag.
+
+## Correlation
+
+Every v2 dispatch has a correlation ID:
+
+```text
+<source-repository>:<source-sha>:<source-run-id>:<source-run-attempt>
+```
+
+The request carries the exact source SHA, source workflow URL and identifiers,
+pull-request metadata, a bounded changed-file sample, and requested segments.
+Extended metadata is nested to remain within GitHub's limit of ten top-level
+`client_payload` properties.
+
+Central run summaries include the same correlation ID. Source statuses link
+directly to the corresponding central run, allowing navigation in both
+directions:
+
+```text
+v2 commit -> source notification run -> central run
+central summary -> source run and exact source SHA
+```
+
+## Database lifecycle
+
+Central CI does not start or stop Supabase directly.
+
+Database-backed tests use the source-owned scaffold under:
+
+```text
+v2/backend/docker/gw-dev/
+v2/backend/config/scaffold/supabase-gw-dev.edn
+```
+
+The shared CI container mounts the workspace at the same absolute path,
+mounts the Docker socket, and uses host networking so the scaffold can manage
+its bundled services.
 
 ## Dependency checkout convention
 
-`v2` owns dependency wiring through:
+`v2` owns dependency wiring:
 
 ```bash
+cd v2
 make deps-checkouts
 ```
 
-This follows the `statstrade-core` convention. The central repository checks out dependency repositories beside the project, while the project creates its own Leiningen `checkouts/` links. Central CI must not rewrite `project.clj` or add repository-specific source paths.
+Central CI checks out dependency repositories beside the project. The project
+creates its own Leiningen `checkouts/` links. Central workflows must not
+rewrite `project.clj` or add repository-specific source paths.
 
-For the current backend pipeline:
+## Shared environment
+
+Backend validation uses:
 
 ```text
-workspace/
-├── foundation-base/
-└── v2/
-    └── backend/checkouts/foundation-base -> workspace/foundation-base
+ghcr.io/zcaudate-xyz/infra-foundation-dev:ci
 ```
+
+The image supplies Java, Leiningen, Docker tooling, and the Supabase CLI.
 
 ## Dispatch payload
 
-The notifier in `greenways-ai/v2` sends a payload equivalent to:
+The current request is `v2-ci-requested`. Important top-level fields include:
 
 ```json
 {
-  "repository": "greenways-ai/v2",
-  "event": "pull_request",
-  "ref": "feature/example",
-  "sha": "<source-commit-sha>",
-  "base_ref": "main",
-  "pr_number": "123",
-  "run_id": "<source-workflow-run>"
+  "correlation_id": "greenways-ai/v2:<sha>:<run>:<attempt>",
+  "source_repository": "greenways-ai/v2",
+  "source_sha": "<exact-sha>",
+  "source_ref": "feature/example",
+  "source_run_url": "https://github.com/...",
+  "source_run_id": 123,
+  "source_run_attempt": 1,
+  "pull_request_number": 42,
+  "segments": {
+    "gwdb_core": true,
+    "gwdb_rpc": true,
+    "docs": false
+  },
+  "metadata": {
+    "schema_version": 2
+  }
 }
 ```
 
-The central workflow uses `sha` as the checkout ref and records the resolved value in the run summary.
-
-## Manual validation
-
-From the GitHub Actions page, select **Greenways v2 gwdb**, choose **Run workflow**, and enter a `greenways-ai/v2` branch, tag, or commit SHA.
-
-Equivalent CLI usage:
-
-```bash
-gh workflow run v2-gwdb.yml \
-  --repo greenways-ai/greenways-ci \
-  -f source_ref=main
-```
-
-Inspect the run summary to confirm the requested ref resolved to the intended source SHA.
-
 ## Repository access
 
-Cross-repository automation currently uses a secret named `GH_TOKEN`.
+Cross-repository automation uses a secret named `GH_TOKEN`.
 
-It needs narrowly scoped permissions for:
+It must be able to:
 
-- `greenways-ai/v2`: dispatch an event to `greenways-ai/greenways-ci`
-- `greenways-ai/greenways-ci`: read the requested private `greenways-ai/v2` revision
-- `zcaudate-xyz/foundation-base`: read the dependency source checkout when authentication is required
+- read the private `greenways-ai/v2` source revision
+- read `zcaudate-xyz/foundation-base`
+- pull the shared GHCR image
+- receive dispatches from `greenways-ai/v2`
+- write commit statuses on `greenways-ai/v2`
 
-Prefer a GitHub App or fine-grained token restricted to these repositories. Publishing and deployment credentials should be stored separately in protected environments.
+Prefer a GitHub App or fine-grained token restricted to the required
+repositories and operations.
 
 ## Diagnostics
 
-The `v2-gwdb` workflow uploads:
+The backend workflow uploads available files from:
 
 ```text
 v2/backend/lein-check.log
-v2/backend/gwdb-test.log
+v2/backend/gwdb-core-test.log
+v2/backend/gwdb-rpc-test.log
 ```
 
-Artifacts are retained for 14 days. Compilation and tests are separate steps so both logs are collected during baseline stabilization.
+Artifacts are retained for 14 days.
 
-When investigating a failure, verify in this order:
+When investigating a failure, verify:
 
-1. requested and resolved `v2` SHA
-2. resolved `foundation-base` SHA
-3. shared CI image pull
-4. `make deps-checkouts` output and symlink target
-5. Docker socket and host networking
-6. compilation output
-7. `gw-dev` scaffold startup output
-8. failing `gwdb` namespace or fact
+1. correlation ID
+2. requested and resolved source SHA
+3. Foundation SHA
+4. shared image pull
+5. `make deps-checkouts`
+6. backend compilation
+7. `gw-dev` scaffold startup
+8. the failing namespace selector
 
 ## Legacy workflows
 
-The previous workflow set targeted obsolete applications, packages, commands, and deployment paths. Retirement notes are stored under:
+The obsolete monorepo workflows remain documented under:
 
 ```text
 archive/workflows/legacy-v2-monorepo/
 ```
 
-The complete removed workflows remain available in Git history. Do not restore them directly into `.github/workflows/`; rebuild capabilities from commands verified against the current source layout.
+They referenced retired applications, package names, and deployment paths.
+Do not restore them directly.
 
-## Adding a pipeline stage
+## Next stages
 
-New stages should follow these rules:
+Recommended additions are:
 
-- always check out the exact notified source revision
-- keep source repository workflows limited to notification
-- use project-owned dependency checkout commands
-- reuse the shared `infra-foundation-dev:ci` environment where appropriate
-- let source-owned test scaffolds manage their own services
-- keep pull-request jobs free of publishing or production credentials
-- upload useful failure diagnostics
-- write resolved source and dependency SHAs into the run summary
-- separate validation, publishing, and deployment permissions
+1. segmented frontend install, typecheck, lint, Jest, and builds
+2. deterministic generated SQL and API checks
+3. package tarball readiness
+4. protected staging deployment
+5. production promotion of an already-tested artifact
+6. rollback and credential-rotation procedures
 
-Recommended next stages:
-
-1. frontend install, typecheck, lint, Jest, and Turborepo build
-2. generated SQL and API reproducibility checks
-3. package tarball readiness checks
-4. status reporting back to the source commit or pull request
-5. protected staging deployment
-6. protected production promotion of an already-tested artifact
-
-## Source commands
-
-Current Greenways v2 commands expected by central CI:
-
-```bash
-# Dependency checkouts
-make deps-checkouts
-
-# Backend
-cd backend
-lein check
-lein test :in gwdb
-
-# Frontend, planned central stage
-cd main
-corepack enable
-yarn install --immutable
-yarn typecheck
-yarn lint
-yarn test --runInBand
-yarn build
-```
-
-## Contributing
-
-1. Branch from `main`.
-2. Keep each workflow focused on one source repository or deployment responsibility.
-3. Test changes with `workflow_dispatch` or a pipeline pull request.
-4. Confirm the run uses the intended source SHA.
-5. Document new events, inputs, secrets, artifacts, and failure modes here.
+Validation, publishing, and deployment credentials should remain separated.
 
 ## License
 
