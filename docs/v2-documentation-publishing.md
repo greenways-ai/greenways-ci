@@ -10,6 +10,10 @@ separate top-level workflow.
 - Manual dispatch can independently enable documentation and publishing.
 - Backend-only requests do not allocate a documentation runner.
 
+The retired `Publish Web Main` workflow is unrelated to documentation
+publishing and has been removed with the old application and tRPC reusable
+workflows.
+
 Required repository configuration:
 
 1. `GH_TOKEN` must be able to read the private `greenways-ai/v2` repository.
