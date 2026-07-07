@@ -1,7 +1,7 @@
 # Greenways CI - Makefile
 # Provides convenient commands for triggering workflows
 
-.PHONY: list runs ci ci-staging ci-prod ci-test ci-test-trpc ci-e2e \
+.PHONY: list runs ci ci-staging ci-prod ci-test ci-e2e \
         deploy-spaces deploy-vibe deploy-ragtrain \
         storybook storybook-chromatic \
         packages-publish packages-publish-now
@@ -35,7 +35,7 @@ ci-staging:
 	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
 		-f environment=staging -f run-tests=true -f run-e2e=false -f deploy=false
 
-# Run CI/CD for production (full pipeline with E2E and deploy)
+# Run CI/CD for production (full pipeline with E2E + deploy)
 ci-prod:
 	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
 		-f environment=production -f run-tests=true -f run-e2e=true -f deploy=true
@@ -44,11 +44,6 @@ ci-prod:
 ci-test:
 	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
 		-f environment=staging -f run-tests=true -f run-e2e=false -f deploy=false
-
-# Run tRPC tests only
-ci-test-trpc:
-	gh workflow run ci-cd.yml --repo greenways-ai/greenways-ci \
-		-f environment=staging -f apps=gw-spaces -f run-tests=true -f run-e2e=false -f deploy=false
 
 # Run with E2E tests
 ci-e2e:
@@ -111,19 +106,3 @@ packages-publish:
 packages-publish-now:
 	gh workflow run gw-publish-packages.yml --repo greenways-ai/greenways-ci \
 		-f dry-run=false
-
-# =============================================================================
-# Legacy Web Deployments (web-main.yml)
-# =============================================================================
-
-# Deploy web to staging (legacy)
-web-deploy:
-	gh workflow run web-main.yml --repo greenways-ai/greenways-ci
-
-# Deploy web to staging (explicit)
-web-deploy-staging:
-	gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=staging
-
-# Deploy web to production
-web-deploy-prod:
-	gh workflow run web-main.yml --repo greenways-ai/greenways-ci -f environment=production
