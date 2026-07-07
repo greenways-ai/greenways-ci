@@ -232,6 +232,10 @@ not restore them directly. The retired top-level `v2-gwdb.yml` and
 `v2-docs.yml` workflows were superseded by `v2-ci.yml` and are not archived
 because their job definitions now live in the combined workflow.
 
+The orphaned `_Build Application`, `_Test tRPC Routers`, and `Publish Web Main`
+workflow files were also removed. They targeted the retired `gw-v2` monorepo
+layout and were not part of the current segmented `v2` CI contract.
+
 ## Next stages
 
 Recommended additions are:
