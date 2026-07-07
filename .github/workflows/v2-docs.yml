@@ -1,0 +1,68 @@
+name: V2 Documentation
+
+on:
+  repository_dispatch:
+    types: [v2-changed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve source
+        id: source
+        run: |
+          echo "ref=${{ github.event.client_payload.sha || 'main' }}" >> "$GITHUB_OUTPUT"
+          echo "publish=${{ github.event.client_payload.ref == 'main' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout v2
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          ref: ${{ steps.source.outputs.ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and build
+        working-directory: v2/docs-gen
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-docs-build
+          path: v2/docs-gen/build
+
+      - name: Configure Pages
+        if: steps.source.outputs.publish == 'true'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: steps.source.outputs.publish == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: v2/docs-gen/build
+
+  deploy:
+    needs: build
+    if: github.event.client_payload.ref == 'main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
