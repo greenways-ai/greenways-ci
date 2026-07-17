@@ -61,12 +61,12 @@ jobs:
           docker pull "$CI_IMAGE"
           docker run --rm --network host -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd foundation-base && lein install'
           docker run --rm --network host -e KIND -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd v2 && make deps-checkouts && cd backend && lein run -m "gwbuild.build-$KIND"'
-      - name: Build JavaScript artifacts
+      - name: Check emitted JavaScript
         id: js
         if: steps.generate.outcome == 'success' && inputs.kind == 'js'
         continue-on-error: true
-        working-directory: v2
-        run: make gwlink-sharedworker-build
+        working-directory: v2/backend
+        run: node --check .build/gwlink-js/main.js
       - name: Analyze and compile Dart artifact
         id: dart
         if: steps.generate.outcome == 'success' && inputs.kind == 'dart'
@@ -82,8 +82,7 @@ jobs:
         with:
           name: v2-gwlink-${{ inputs.kind }}-${{ github.run_id }}
           path: |
-            v2/backend/.build/gwlink-sharedworker-xtdb/dist
-            v2/backend/.build/gwlink-webapp-remote/.next
+            v2/backend/.build/gwlink-js/main.js
             v2/backend/.build/gwlink-flutter-native/build
             v2/backend/.build/gwlink-flutter-native/pubspec.lock
           if-no-files-found: warn
