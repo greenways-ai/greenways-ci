@@ -1,0 +1,112 @@
+name: _V2 language build
+
+on:
+  workflow_call:
+    inputs:
+      source_repository: {required: true, type: string}
+      source_ref: {required: true, type: string}
+      kind: {required: true, type: string}
+      status_context: {required: true, type: string}
+      report_status: {required: false, default: false, type: boolean}
+    secrets:
+      GH_TOKEN: {required: true}
+
+permissions:
+  contents: read
+
+env:
+  CI_IMAGE: ghcr.io/zcaudate-xyz/infra-foundation-dev:ci
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: gwlink ${{ inputs.kind }} build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: v2
+      - id: foundation
+        run: echo "sha=$(git -C v2 ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          ref: ${{ steps.foundation.outputs.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: foundation-base
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+      - uses: actions/setup-node@v4
+        if: inputs.kind == 'js'
+        with:
+          node-version: '22'
+      - uses: dart-lang/setup-dart@v1
+        if: inputs.kind == 'dart'
+        with:
+          sdk: stable
+      - name: Generate build project
+        id: generate
+        continue-on-error: true
+        env:
+          KIND: ${{ inputs.kind }}
+        run: |
+          mkdir -p "$HOME/.m2"
+          docker pull "$CI_IMAGE"
+          docker run --rm --network host -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd foundation-base && lein install'
+          docker run --rm --network host -e KIND -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd v2 && make deps-checkouts && cd backend && lein run -m "gwbuild.build-$KIND"'
+      - name: Build JavaScript artifacts
+        id: js
+        if: steps.generate.outcome == 'success' && inputs.kind == 'js'
+        continue-on-error: true
+        working-directory: v2
+        run: make gwlink-sharedworker-build
+      - name: Analyze and compile Dart artifact
+        id: dart
+        if: steps.generate.outcome == 'success' && inputs.kind == 'dart'
+        continue-on-error: true
+        working-directory: v2/backend/.build/gwlink-flutter-native
+        run: |
+          dart pub get
+          dart analyze
+          dart compile exe bin/main.dart -o build/gwlink-dart
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-gwlink-${{ inputs.kind }}-${{ github.run_id }}
+          path: |
+            v2/backend/.build/gwlink-sharedworker-xtdb/dist
+            v2/backend/.build/gwlink-webapp-remote/.next
+            v2/backend/.build/gwlink-flutter-native/build
+            v2/backend/.build/gwlink-flutter-native/pubspec.lock
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Report source result
+        if: always() && inputs.report_status
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+          GENERATE: ${{ steps.generate.outcome }}
+          BUILD: ${{ inputs.kind == 'js' && steps.js.outcome || steps.dart.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            const passed = process.env.GENERATE === 'success' && process.env.BUILD === 'success';
+            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: process.env.STATUS_CONTEXT, description: passed ? 'Build passed' : 'Build failed', target_url: process.env.RUN_URL});
+      - name: Enforce result
+        if: always()
+        env:
+          GENERATE: ${{ steps.generate.outcome }}
+          BUILD: ${{ inputs.kind == 'js' && steps.js.outcome || steps.dart.outcome }}
+        run: test "$GENERATE" = success && test "$BUILD" = success

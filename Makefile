@@ -1,24 +1,45 @@
-# Greenways CI - active workflow helpers
+.PHONY: list runs watch run-all run-core run-rpc run-gwbuild run-gwlink run-js run-dart run-frontend run-docs publish-docs
 
-.PHONY: list runs watch run-core run-rpc run-docs publish-docs
+WORKFLOW := v2-ci.yml
+REPO := greenways-ai/greenways-ci
+BASE := gh workflow run $(WORKFLOW) --repo $(REPO) -f source_ref=main
+OFF := -f run_core=false -f run_rpc=false -f run_gwbuild=false -f run_gwlink=false -f run_backend_support=false -f run_js=false -f run_dart=false -f run_frontend=false -f run_docs=false
 
 list:
-	gh workflow list --repo greenways-ai/greenways-ci
+	gh workflow list --repo $(REPO)
 
 runs:
-	gh run list --repo greenways-ai/greenways-ci
+	gh run list --repo $(REPO)
 
 watch:
-	gh run watch --repo greenways-ai/greenways-ci
+	gh run watch --repo $(REPO)
+
+run-all:
+	$(BASE)
 
 run-core:
-	gh workflow run v2-ci.yml --repo greenways-ai/greenways-ci -f source_ref=main -f run_core=true -f run_rpc=false -f run_docs=false -f publish_docs=false
+	$(BASE) $(OFF) -f run_core=true
 
 run-rpc:
-	gh workflow run v2-ci.yml --repo greenways-ai/greenways-ci -f source_ref=main -f run_core=false -f run_rpc=true -f run_docs=false -f publish_docs=false
+	$(BASE) $(OFF) -f run_rpc=true
+
+run-gwbuild:
+	$(BASE) $(OFF) -f run_gwbuild=true
+
+run-gwlink:
+	$(BASE) $(OFF) -f run_gwlink=true
+
+run-js:
+	$(BASE) $(OFF) -f run_js=true
+
+run-dart:
+	$(BASE) $(OFF) -f run_dart=true
+
+run-frontend:
+	$(BASE) $(OFF) -f run_frontend=true
 
 run-docs:
-	gh workflow run v2-ci.yml --repo greenways-ai/greenways-ci -f source_ref=main -f run_core=false -f run_rpc=false -f run_docs=true -f publish_docs=false
+	$(BASE) $(OFF) -f run_docs=true -f publish_docs=false
 
 publish-docs:
-	gh workflow run v2-ci.yml --repo greenways-ai/greenways-ci -f source_ref=main -f run_core=false -f run_rpc=false -f run_docs=true -f publish_docs=true
+	$(BASE) $(OFF) -f run_docs=true -f publish_docs=true

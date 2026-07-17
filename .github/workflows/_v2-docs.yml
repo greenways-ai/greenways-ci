@@ -1,0 +1,81 @@
+name: _V2 docs
+
+on:
+  workflow_call:
+    inputs:
+      source_repository: {required: true, type: string}
+      source_ref: {required: true, type: string}
+      publish: {required: false, default: false, type: boolean}
+      report_status: {required: false, default: false, type: boolean}
+    secrets:
+      GH_TOKEN: {required: true}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Docusaurus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build documentation
+        id: build
+        continue-on-error: true
+        working-directory: v2/docs-gen
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          test -f build/index.html
+          test -d build/assets/js
+          test -d build/assets/css
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-docusaurus-${{ github.run_id }}
+          path: v2/docs-gen/build
+          if-no-files-found: warn
+          retention-days: 14
+      - if: inputs.publish && steps.build.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: v2/docs-gen/build
+      - if: always() && inputs.report_status
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+          RESULT: ${{ steps.build.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
+            const passed = process.env.RESULT === 'success';
+            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: 'greenways-ci/docs', description: passed ? 'Documentation passed' : 'Documentation failed', target_url: process.env.RUN_URL});
+      - if: always()
+        env:
+          RESULT: ${{ steps.build.outcome }}
+        run: test "$RESULT" = success
+
+  deploy:
+    name: Deploy Docusaurus
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
