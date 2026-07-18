@@ -1,0 +1,478 @@
+name: Statstrade environment lifecycle
+
+on:
+  workflow_call:
+    inputs:
+      action: {required: true, type: string}
+      correlation_id: {required: true, type: string}
+      slug: {required: true, type: string}
+      source_repository: {required: true, type: string}
+      source_ref: {required: false, type: string}
+      profile: {required: true, type: string}
+      confirm_delete: {required: false, type: string}
+      secrets_ref: {required: true, type: string}
+    secrets:
+      GH_TOKEN: {required: true}
+      DOT_SECRETS_SSH_KEY: {required: true}
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Lifecycle action
+        required: true
+        type: choice
+        options: [create, deploy, delete]
+      correlation_id:
+        description: Control-plane operation identifier
+        required: true
+        type: string
+      slug:
+        description: Environment DNS label
+        required: true
+        type: string
+      source_repository:
+        description: Source repository
+        required: true
+        default: greenways-ai/v2
+        type: string
+      source_ref:
+        description: Source branch, tag, or commit for create
+        required: false
+        type: string
+      profile:
+        description: Backend configuration profile
+        required: true
+        default: shared-dev
+        type: choice
+        options: [shared-dev, testnet]
+      confirm_delete:
+        description: Must equal slug for delete
+        required: false
+        type: string
+      secrets_ref:
+        description: Branch, tag, or commit in statstrade-dev/dot-secrets
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: statstrade-environment-${{ inputs.slug }}
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.slug == 'testing' && 'testing' || inputs.profile }}
+    timeout-minutes: 45
+    env:
+      ACTION: ${{ inputs.action }}
+      CORRELATION_ID: ${{ inputs.correlation_id }}
+      SLUG: ${{ inputs.slug }}
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      REQUESTED_SOURCE_REF: ${{ inputs.source_ref }}
+      PROFILE: ${{ inputs.profile }}
+      CONFIRM_DELETE: ${{ inputs.confirm_delete }}
+      SECRETS_REF: ${{ inputs.secrets_ref }}
+
+    steps:
+      - name: Check out central orchestration
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Check out trusted V2 control-plane code
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          ref: main
+          token: ${{ secrets.GH_TOKEN }}
+          path: control
+          persist-credentials: false
+
+      - name: Validate lifecycle request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SLUG" =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]]
+          [[ "$ACTION" =~ ^(create|deploy|delete)$ ]]
+          [[ "$PROFILE" =~ ^(shared-dev|testnet)$ ]]
+          [[ "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          case "$SLUG" in
+            api|build|cms|dev|mail|next|statstrade|supabase|www) exit 2;;
+          esac
+          if [[ "$ACTION" == create ]]; then
+            [[ -n "$REQUESTED_SOURCE_REF" ]]
+          fi
+          if [[ "$ACTION" == delete ]]; then
+            [[ "$CONFIRM_DELETE" == "$SLUG" ]]
+            [[ "$SLUG" != testing ]]
+          fi
+          if [[ "$SLUG" == testing ]]; then
+            [[ "$PROFILE" == testnet ]]
+          fi
+
+      - name: Configure dot-secrets deploy key
+        shell: bash
+        env:
+          DOT_SECRETS_SSH_KEY: ${{ secrets.DOT_SECRETS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/dot-secrets-key"
+          known_hosts="$RUNNER_TEMP/dot-secrets-known-hosts"
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$DOT_SECRETS_SSH_KEY" > "$key"
+          ssh-keyscan -H github.com > "$known_hosts"
+          echo "DOT_SECRETS_GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      - name: Check out pinned deployment secrets
+        id: secret-revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/dot-secrets"
+          git init -q "$directory"
+          git -C "$directory" remote add origin git@github.com:statstrade-dev/dot-secrets.git
+          GIT_SSH_COMMAND="$DOT_SECRETS_GIT_SSH_COMMAND" git -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
+          git -C "$directory" checkout -q --detach FETCH_HEAD
+          echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Load allowlisted provider secrets
+        id: provider-secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          secrets_directory="$RUNNER_TEMP/dot-secrets/v2/statstrade/development/$PROFILE"
+          if [[ "$SLUG" == testing ]]; then
+            secrets_directory="$RUNNER_TEMP/dot-secrets/v2/statstrade/testing"
+          fi
+          node ci/.github/scripts/load-env-files.mjs \
+            "$secrets_directory" \
+            ci/.github/config/statstrade-development-secrets.json
+
+      - name: Record queued operation
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          set -euo pipefail
+          jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:"running",message:"Lifecycle workflow started.",workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation.json
+          node control/.github/scripts/dev-environment-state.mjs op-put operation.json
+
+      - name: Load existing environment
+        id: existing
+        if: inputs.action != 'create'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          set -euo pipefail
+          node control/.github/scripts/dev-environment-state.mjs route-get "$SLUG.dev.statstrade.io" route.json
+          protected="$(jq -r 'if .version == 2 then .protected else .slug == "testing" end' route.json)"
+          if [[ "$ACTION" == delete && "$protected" == true ]]; then
+            echo "Protected environments cannot be deleted." >&2
+            exit 2
+          fi
+          {
+            echo "source_ref=$(jq -r .gitRef route.json)"
+            echo "profile=$(jq -r .profile route.json)"
+            echo "site_id=$(jq -r .netlifySiteId route.json)"
+            echo "sql_digest=$(jq -r '.sqlDigest // empty' route.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == create ]]; then
+            checkout_ref="$REQUESTED_SOURCE_REF"
+            git_ref="$REQUESTED_SOURCE_REF"
+            selected_profile="$PROFILE"
+          elif [[ "$SLUG" == testing && -n "$REQUESTED_SOURCE_REF" ]]; then
+            checkout_ref="$REQUESTED_SOURCE_REF"
+            git_ref="main"
+            selected_profile="${{ steps.existing.outputs.profile }}"
+          else
+            checkout_ref="${{ steps.existing.outputs.source_ref }}"
+            git_ref="${{ steps.existing.outputs.source_ref }}"
+            selected_profile="${{ steps.existing.outputs.profile }}"
+          fi
+          {
+            echo "checkout_ref=$checkout_ref"
+            echo "git_ref=$git_ref"
+            echo "profile=$selected_profile"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out environment source
+        if: inputs.action != 'delete'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ steps.source.outputs.checkout_ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve immutable source and SQL identity
+        id: identity
+        if: inputs.action != 'delete'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployment_dir="source/main/sql/deploy"
+          node control/.github/scripts/validate-deployment-sql.mjs "$deployment_dir" \
+            > deployment-sql.json
+          jq -r '.bootstrap.sha256' deployment-sql.json \
+            > "$deployment_dir/bootstrap.sha256"
+          jq -r '.migrations[] | "\(.sha256) \(.path)"' deployment-sql.json \
+            > "$deployment_dir/migrations.list"
+          {
+            echo "source_sha=$(git -C source rev-parse HEAD)"
+            echo "sql_digest=$(jq -r .bundleSha256 deployment-sql.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure server SSH
+        shell: bash
+        env:
+          DEV_SERVER_HOST: ${{ steps.provider-secrets.outputs.DEV_SERVER_HOST }}
+          DEV_SERVER_USER_VALUE: ${{ steps.provider-secrets.outputs.DEV_SERVER_USER }}
+          DEV_SERVER_SSH_KEY: ${{ steps.provider-secrets.outputs.DEV_SERVER_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          echo "DEV_SERVER_USER=${DEV_SERVER_USER_VALUE:-root}" >> "$GITHUB_ENV"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEV_SERVER_SSH_KEY" > "$HOME/.ssh/statstrade-deploy"
+          chmod 600 "$HOME/.ssh/statstrade-deploy"
+          ssh-keyscan -H "$DEV_SERVER_HOST" >> "$HOME/.ssh/known_hosts"
+          echo "DEV_SERVER_HOST=$DEV_SERVER_HOST" >> "$GITHUB_ENV"
+
+      - name: Install trusted server lifecycle script
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -i "$HOME/.ssh/statstrade-deploy"             control/ops/dev-environments/server/environment.sh             "$DEV_SERVER_USER@$DEV_SERVER_HOST:/tmp/statstrade-environment.sh"
+          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"             'install -D -m 700 /tmp/statstrade-environment.sh /opt/statstrade/bin/environment'
+
+      - name: Create backend DNS
+        if: inputs.action == 'create'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_STATSTRADE_ZONE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_STATSTRADE_ZONE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: node control/.github/scripts/dev-environment-state.mjs dns-put "$SLUG.supabase.statstrade.io" "$DEV_SERVER_HOST"
+
+      - name: Provision and migrate Supabase
+        id: backend
+        if: inputs.action != 'delete'
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_dir="/tmp/statstrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
+          ssh -i "$HOME/.ssh/statstrade-deploy" \
+            "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+            "install -d -m 700 '$remote_dir'"
+          scp -r -i "$HOME/.ssh/statstrade-deploy" \
+            source/main/sql/deploy/. \
+            "$DEV_SERVER_USER@$DEV_SERVER_HOST:$remote_dir/"
+          if [[ "$ACTION" == create ]]; then
+            ssh -i "$HOME/.ssh/statstrade-deploy" \
+              "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+              "/opt/statstrade/bin/environment create '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir/bootstrap.sql'" \
+              > backend-before-migrations.json
+          else
+            ssh -i "$HOME/.ssh/statstrade-deploy" \
+              "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+              "/opt/statstrade/bin/environment status '$SLUG' '${{ steps.source.outputs.profile }}'" \
+              > backend-before-migrations.json
+          fi
+          ssh -i "$HOME/.ssh/statstrade-deploy" \
+            "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+            "/opt/statstrade/bin/environment migrate '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir' '${{ steps.identity.outputs.sql_digest }}'" \
+            > backend.json
+          anon_key="$(jq -r .anonKey backend.json)"
+          echo "::add-mask::$anon_key"
+          echo "supabase_url=$(jq -r .supabaseUrl backend.json)" >> "$GITHUB_OUTPUT"
+          echo "anon_key=$anon_key" >> "$GITHUB_OUTPUT"
+
+      - name: Create Netlify site
+        id: site
+        if: inputs.action == 'create'
+        shell: bash
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
+        run: |
+          set -euo pipefail
+          suffix="$(printf '%s' "$CORRELATION_ID" | cut -c1-8)"
+          curl --fail-with-body --silent --show-error             -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"             -H 'Content-Type: application/json'             -d "$(jq -nc --arg name "statstrade-$SLUG-$suffix" '{name:$name}')"             "https://api.netlify.com/api/v1/$NETLIFY_ACCOUNT_SLUG/sites" > site.json
+          echo "site_id=$(jq -r .id site.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        if: inputs.action != 'delete'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: source/main/yarn.lock
+
+      - name: Install frontend dependencies
+        if: inputs.action != 'delete'
+        working-directory: source/main
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Build frontend without provider credentials
+        if: inputs.action != 'delete'
+        working-directory: source
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ steps.backend.outputs.supabase_url }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ steps.backend.outputs.anon_key }}
+          STATSTRADE_ENVIRONMENT: ${{ inputs.slug }}
+        run: corepack yarn dlx netlify-cli@26.2.0 build
+
+      - name: Deploy prebuilt frontend
+        id: deploy
+        if: inputs.action != 'delete'
+        working-directory: source
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          SITE_ID_CREATE: ${{ steps.site.outputs.site_id }}
+          SITE_ID_EXISTING: ${{ steps.existing.outputs.site_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_id="${SITE_ID_CREATE:-${SITE_ID_EXISTING:-}}"
+          corepack yarn dlx netlify-cli@26.2.0 deploy --no-build --prod             --site "$site_id" --auth "$NETLIFY_AUTH_TOKEN"             --message "Environment $SLUG from ${{ steps.identity.outputs.source_sha }}"             --json > ../deploy.json
+          {
+            echo "site_id=$site_id"
+            echo "deploy_id=$(jq -r '.deploy_id // .deployId // .id' ../deploy.json)"
+            echo "origin_url=$(jq -r '.deploy_url // .deployUrl // .url' ../deploy.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test unpublished services
+        if: inputs.action != 'delete'
+        env:
+          ANON_KEY: ${{ steps.backend.outputs.anon_key }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 5 --retry-all-errors             "${{ steps.deploy.outputs.origin_url }}" > /dev/null
+          curl --fail --silent --show-error --retry 5 --retry-all-errors             -H "apikey: $ANON_KEY"             "${{ steps.backend.outputs.supabase_url }}/auth/v1/health" > /dev/null
+
+      - name: Publish frontend route
+        if: inputs.action != 'delete'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          set -euo pipefail
+          origin_hostname="$(node -e 'console.log(new URL(process.argv[1]).hostname)' '${{ steps.deploy.outputs.origin_url }}')"
+          created_at="$(date -u +%FT%TZ)"
+          if [[ -f route.json ]]; then created_at="$(jq -r .createdAt route.json)"; fi
+          kind=development
+          protected=false
+          if [[ "$SLUG" == testing ]]; then kind=testing; protected=true; fi
+          jq -n             --arg slug "$SLUG"             --arg hostname "$SLUG.dev.statstrade.io"             --arg origin "$origin_hostname"             --arg site '${{ steps.deploy.outputs.site_id }}'             --arg deploy '${{ steps.deploy.outputs.deploy_id }}'             --arg ref '${{ steps.source.outputs.git_ref }}'             --arg profile '${{ steps.source.outputs.profile }}'             --arg sha '${{ steps.identity.outputs.source_sha }}'             --arg secrets '${{ steps.secret-revision.outputs.sha }}'             --arg sql '${{ steps.identity.outputs.sql_digest }}'             --arg supabase '${{ steps.backend.outputs.supabase_url }}'             --arg kind "$kind"             --argjson protected "$protected"             --arg created "$created_at"             --arg updated "$(date -u +%FT%TZ)"             '{version:2,slug:$slug,hostname:$hostname,originHostname:$origin,netlifySiteId:$site,deployId:$deploy,gitRef:$ref,profile:$profile,commitSha:$sha,secretsSha:$secrets,sqlDigest:$sql,supabaseUrl:$supabase,kind:$kind,protected:$protected,createdAt:$created,updatedAt:$updated}'             > route-next.json
+          node control/.github/scripts/dev-environment-state.mjs route-put route-next.json
+
+      - name: Create testing release manifest
+        if: inputs.action != 'delete' && inputs.slug == 'testing'
+        run: |
+          jq -n             --arg release_id "${{ github.run_id }}-${{ github.run_attempt }}"             --arg source_sha "${{ steps.identity.outputs.source_sha }}"             --arg secrets_sha "${{ steps.secret-revision.outputs.sha }}"             --arg sql_digest "${{ steps.identity.outputs.sql_digest }}"             --arg netlify_deploy_id "${{ steps.deploy.outputs.deploy_id }}"             --arg hostname "$SLUG.dev.statstrade.io"             --arg created_at "$(date -u +%FT%TZ)"             '{version:1,environment:"testing",releaseId:$release_id,sourceSha:$source_sha,secretsSha:$secrets_sha,sqlDigest:$sql_digest,netlifyDeployId:$netlify_deploy_id,hostname:$hostname,testingPassed:true,createdAt:$created_at}'             > testing-release.json
+
+      - name: Publish testing release manifest
+        if: inputs.action != 'delete' && inputs.slug == 'testing'
+        uses: actions/upload-artifact@v4
+        with:
+          name: statstrade-testing-release
+          path: testing-release.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove public routes
+        if: inputs.action == 'delete'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_STATSTRADE_ZONE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_STATSTRADE_ZONE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          node control/.github/scripts/dev-environment-state.mjs route-delete "$SLUG.dev.statstrade.io"
+          node control/.github/scripts/dev-environment-state.mjs dns-delete "$SLUG.supabase.statstrade.io"
+
+      - name: Delete Netlify site and Supabase stack
+        if: inputs.action == 'delete'
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error -X DELETE             -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"             "https://api.netlify.com/api/v1/sites/${{ steps.existing.outputs.site_id }}"
+          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"             "/opt/statstrade/bin/environment delete '$SLUG' '${{ steps.existing.outputs.profile }}'"
+
+      - name: Record successful operation
+        if: success()
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:"succeeded",message:"Lifecycle operation completed.",workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation.json
+          node control/.github/scripts/dev-environment-state.mjs op-put operation.json
+
+      - name: Roll back incomplete create
+        if: failure() && inputs.action == 'create'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_STATSTRADE_ZONE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_STATSTRADE_ZONE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          CREATED_SITE_ID: ${{ steps.site.outputs.site_id }}
+        run: |
+          node control/.github/scripts/dev-environment-state.mjs route-delete "$SLUG.dev.statstrade.io" || true
+          node control/.github/scripts/dev-environment-state.mjs dns-delete "$SLUG.supabase.statstrade.io" || true
+          if [[ -n "${CREATED_SITE_ID:-}" ]]; then
+            curl --silent --show-error -X DELETE               -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"               "https://api.netlify.com/api/v1/sites/$CREATED_SITE_ID" || true
+          fi
+          if [[ -n "${DEV_SERVER_HOST:-}" ]]; then
+            ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"               "/opt/statstrade/bin/environment delete '$SLUG' '$PROFILE'" || true
+          fi
+
+      - name: Record failed operation
+        if: failure()
+        continue-on-error: true
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:"failed",message:"Lifecycle operation failed; inspect the workflow log.",workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation-failed.json
+          node control/.github/scripts/dev-environment-state.mjs op-put operation-failed.json
+
+      - name: Remove staged deployment SQL
+        if: always() && inputs.action != 'delete'
+        continue-on-error: true
+        shell: bash
+        run: |
+          remote_dir="/tmp/statstrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
+          if [[ -n "${DEV_SERVER_HOST:-}" && -f "$HOME/.ssh/statstrade-deploy" ]]; then
+            ssh -i "$HOME/.ssh/statstrade-deploy" \
+              "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+              "rm -rf -- '$remote_dir'"
+          fi
+
+      - name: Remove deployment secrets
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/dot-secrets"
+          rm -f "$RUNNER_TEMP/dot-secrets-key" "$RUNNER_TEMP/dot-secrets-known-hosts"
