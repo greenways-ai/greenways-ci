@@ -145,3 +145,34 @@ jobs:
       publish: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.source_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.publish_docs) || github.event_name == 'push' }}
       report_status: ${{ github.event_name == 'repository_dispatch' }}
     secrets: inherit
+  testing-release:
+    name: Deploy persistent testing
+    needs:
+      - gwdb-core
+      - gwdb-rpc
+      - gwbuild
+      - gwlink
+      - backend-support
+      - gwlink-js
+      - gwlink-dart
+      - frontend
+      - docs
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'repository_dispatch' &&
+        github.event.client_payload.source_ref == 'main' &&
+        !contains(needs.*.result, 'failure') &&
+        !contains(needs.*.result, 'cancelled')
+      }}
+    uses: ./.github/workflows/statstrade-environment.yml
+    with:
+      action: deploy
+      correlation_id: ${{ github.event.client_payload.correlation_id }}
+      slug: testing
+      source_repository: ${{ github.event.client_payload.source_repository }}
+      source_ref: ${{ github.event.client_payload.source_sha }}
+      profile: testnet
+      confirm_delete: ''
+      secrets_ref: main
+    secrets: inherit

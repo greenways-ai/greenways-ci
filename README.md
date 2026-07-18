@@ -31,6 +31,25 @@ Pull requests and `develop` pushes are selected by the V2 source detector.
 Every `main` push and manual full run requests all slices. Unaffected source
 contexts are marked successful without starting central jobs.
 
+## Statstrade environments
+
+`statstrade-environment.yml` owns the trusted lifecycle orchestration for
+`NAME.dev.statstrade.io` and `NAME.supabase.statstrade.io`. The V2 control
+plane dispatches it with a source repository and ref; the workflow resolves the
+ref to an immutable commit before building.
+
+Provider credentials are loaded from an explicit revision of
+`statstrade-dev/dot-secrets` with the repository-scoped
+`DOT_SECRETS_SSH_KEY`. The strict loader exposes allowlisted values only to the
+trusted steps that need them. Arbitrary source builds receive the public
+environment URL and anon key but no Netlify, Cloudflare, SSH, or secrets-repo
+credentials.
+
+Successful exact-`main` V2 CI runs deploy the protected
+`testing.dev.statstrade.io` environment and publish a non-secret release
+manifest. Initial testing creation is gated on the validated
+`main/sql/deploy/bootstrap.sql` artifact required by plan 2110.
+
 ## Generated artifacts
 
 The `gwbuild` slice runs the canonical RPC, link and SQL generators and fails
