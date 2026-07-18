@@ -29,6 +29,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Build business-plan PDFs
+        working-directory: v2
+        run: |
+          docs/business-plan/install-deps.sh
+          make -C docs/business-plan publish
+          test -f docs-gen/static/documents/business-plan/business-plan.pdf
+          test -f docs-gen/static/documents/business-plan/case-studies/bondi-surf-life-saving-club.pdf
+          test -f docs-gen/static/documents/business-plan/case-studies/community-strong-australia.pdf
+          test -f docs-gen/static/documents/business-plan/case-studies/city2surf-organisers.pdf
+          test -f docs-gen/static/documents/business-plan/case-studies/australian-red-cross-community-readiness.pdf
+          test -f docs-gen/static/documents/business-plan/case-studies/reckless-ben-bricks-and-minifigs-accountability.pdf
       - name: Build documentation
         id: build
         continue-on-error: true
