@@ -16,6 +16,7 @@ on:
       run_frontend: {description: 'Validate main frontend', required: true, default: true, type: boolean}
       run_docs: {description: 'Build Docusaurus', required: true, default: true, type: boolean}
       publish_docs: {description: 'Publish Docusaurus', required: true, default: false, type: boolean}
+      deploy_docs_preview: {description: 'Deploy a Build Portal preview', required: true, default: false, type: boolean}
   push:
     branches: [main]
     paths: ['.github/workflows/**', 'README.md', 'Makefile', 'docs/**']
@@ -143,5 +144,6 @@ jobs:
       source_repository: ${{ github.event.client_payload.source_repository || 'greenways-ai/v2' }}
       source_ref: ${{ github.event.client_payload.source_sha || inputs.source_ref || 'main' }}
       publish: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.source_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.publish_docs) || github.event_name == 'push' }}
+      deploy_preview: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number != null) || (github.event_name == 'workflow_dispatch' && inputs.deploy_docs_preview) || github.event_name == 'pull_request' }}
       report_status: ${{ github.event_name == 'repository_dispatch' }}
     secrets: inherit
