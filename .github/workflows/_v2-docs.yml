@@ -1,4 +1,4 @@
-name: _V2 docs
+name: _V2 docs and build portal
 
 on:
   workflow_call:
@@ -6,18 +6,19 @@ on:
       source_repository: {required: true, type: string}
       source_ref: {required: true, type: string}
       publish: {required: false, default: false, type: boolean}
+      deploy_preview: {required: false, default: false, type: boolean}
       report_status: {required: false, default: false, type: boolean}
     secrets:
       GH_TOKEN: {required: true}
+      NETLIFY_AUTH_TOKEN: {required: false}
+      NETLIFY_SITE_ID: {required: false}
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
-    name: Docusaurus
+    name: Docusaurus and Build Portal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,24 +44,23 @@ jobs:
       - name: Build documentation
         id: build
         continue-on-error: true
-        working-directory: v2/docs-gen
+        working-directory: v2/main
         run: |
-          npm install --no-audit --no-fund
-          npm run build
-          test -f build/index.html
-          test -d build/assets/js
-          test -d build/assets/css
+          yarn workspace @statstrade/web build:portal
+          test -f apps/statstrade/public/docs/index.html
+          test -d apps/statstrade/public/docs/assets/js
+          test -d apps/statstrade/public/docs/assets/css
+          test -f apps/statstrade/.next/BUILD_ID
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v2-docusaurus-${{ github.run_id }}
-          path: v2/docs-gen/build
+          name: v2-build-portal-${{ github.run_id }}
+          path: |
+            v2/main/apps/statstrade/public/docs
+            v2/main/apps/statstrade/.next/BUILD_ID
+            v2/main/apps/statstrade/.next/build-manifest.json
           if-no-files-found: warn
           retention-days: 14
-      - if: inputs.publish && steps.build.outcome == 'success'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: v2/docs-gen/build
       - if: always() && inputs.report_status
         uses: actions/github-script@v7
         env:
@@ -73,20 +73,62 @@ jobs:
           script: |
             const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
             const passed = process.env.RESULT === 'success';
-            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: 'greenways-ci/docs', description: passed ? 'Documentation passed' : 'Documentation failed', target_url: process.env.RUN_URL});
+            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: 'greenways-ci/docs', description: passed ? 'Build Portal passed' : 'Build Portal failed', target_url: process.env.RUN_URL});
       - if: always()
         env:
           RESULT: ${{ steps.build.outcome }}
         run: test "$RESULT" = success
 
   deploy:
-    name: Deploy Docusaurus
-    if: inputs.publish
+    name: Deploy Build Portal
+    if: inputs.publish || inputs.deploy_preview
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: ${{ inputs.publish && 'build-portal-production' || 'build-portal-preview' }}
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate Netlify credentials
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
+      - name: Build Netlify deployment
+        working-directory: v2
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: npx --yes netlify-cli@26.2.0 build
+      - name: Deploy to Netlify
+        id: netlify
+        working-directory: v2
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+          DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
+        run: |
+          deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
+            --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
+            --json)
+          printf '%s\n' "$deploy_output" | tee deploy.json
+          echo "url=$(jq -r '.deploy_url // .deployUrl // .url' deploy.json)" >> "$GITHUB_OUTPUT"
+      - name: Publish deploy summary
+        env:
+          DEPLOY_URL: ${{ steps.netlify.outputs.url }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          {
+            echo '## Statstrade Build Portal'
+            echo
+            echo "- source: \`$SOURCE_REF\`"
+            echo "- deploy: $DEPLOY_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
