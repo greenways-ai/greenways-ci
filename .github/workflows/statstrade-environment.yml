@@ -241,23 +241,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve immutable source and SQL identity
+      - name: Resolve immutable source
         id: identity
         if: inputs.action != 'delete'
         shell: bash
-        run: |
-          set -euo pipefail
-          deployment_dir="source/main/sql/deploy"
-          node control/.github/scripts/validate-deployment-sql.mjs "$deployment_dir" \
-            > deployment-sql.json
-          jq -r '.bootstrap.sha256' deployment-sql.json \
-            > "$deployment_dir/bootstrap.sha256"
-          jq -r '.migrations[] | "\(.sha256) \(.path)"' deployment-sql.json \
-            > "$deployment_dir/migrations.list"
-          {
-            echo "source_sha=$(git -C source rev-parse HEAD)"
-            echo "sql_digest=$(jq -r .bundleSha256 deployment-sql.json)"
-          } >> "$GITHUB_OUTPUT"
+        run: echo "source_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Configure server SSH
         shell: bash
@@ -297,15 +285,7 @@ jobs:
           ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
             "sudo -n /usr/local/sbin/statstrade-deploy install-script '$remote_dir/environment.sh'"
 
-      - name: Create backend DNS
-        if: inputs.action == 'create'
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_STATSTRADE_ZONE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_STATSTRADE_ZONE_ID }}
-          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
-        run: node control/.github/scripts/dev-environment-state.mjs dns-put "$SLUG.supabase.statstrade.io" "$DEV_SERVER_HOST"
-
-      - name: Provision and migrate Supabase
+      - name: Provision bare Supabase
         id: backend
         if: inputs.action != 'delete'
         shell: bash
@@ -315,28 +295,32 @@ jobs:
           ssh -i "$HOME/.ssh/statstrade-deploy" \
             "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
             "install -d -m 700 '$remote_dir'"
-          scp -r -i "$HOME/.ssh/statstrade-deploy" \
-            source/main/sql/deploy/. \
-            "$DEV_SERVER_USER@$DEV_SERVER_HOST:$remote_dir/"
           if [[ "$ACTION" == create ]]; then
+            schema_sql="$RUNNER_TEMP/statstrade-schema-bootstrap.sql"
+            cat > "$schema_sql" <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS gw_core;
+          CREATE SCHEMA IF NOT EXISTS gw_rpc;
+          GRANT USAGE ON SCHEMA gw_core, gw_rpc TO anon, authenticated, service_role;
+          SQL
+            scp -i "$HOME/.ssh/statstrade-deploy" "$schema_sql" \
+              "$DEV_SERVER_USER@$DEV_SERVER_HOST:$remote_dir/schema-bootstrap.sql"
             ssh -i "$HOME/.ssh/statstrade-deploy" \
               "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
-              "sudo -n /usr/local/sbin/statstrade-deploy environment create '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir/bootstrap.sql'" \
-              > backend-before-migrations.json
+              "sudo -n /usr/local/sbin/statstrade-deploy environment create '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir/schema-bootstrap.sql'" \
+              > backend.json
           else
             ssh -i "$HOME/.ssh/statstrade-deploy" \
               "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
               "sudo -n /usr/local/sbin/statstrade-deploy environment status '$SLUG' '${{ steps.source.outputs.profile }}'" \
-              > backend-before-migrations.json
+              > backend.json
           fi
-          ssh -i "$HOME/.ssh/statstrade-deploy" \
-            "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
-            "sudo -n /usr/local/sbin/statstrade-deploy environment migrate '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir' '${{ steps.identity.outputs.sql_digest }}'" \
-            > backend.json
           anon_key="$(jq -r .anonKey backend.json)"
           echo "::add-mask::$anon_key"
-          echo "supabase_url=$(jq -r .supabaseUrl backend.json)" >> "$GITHUB_OUTPUT"
-          echo "anon_key=$anon_key" >> "$GITHUB_OUTPUT"
+          {
+            echo "supabase_url=$(jq -r .supabaseUrl backend.json)"
+            echo "anon_key=$anon_key"
+            echo "sql_digest=$(jq -r .sqlDigest backend.json)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create Netlify site
         id: site
@@ -418,13 +402,13 @@ jobs:
           kind=development
           protected=false
           if [[ "$SLUG" == testing ]]; then kind=testing; protected=true; fi
-          jq -n             --arg slug "$SLUG"             --arg hostname "$SLUG.dev.statstrade.io"             --arg origin "$origin_hostname"             --arg site '${{ steps.deploy.outputs.site_id }}'             --arg deploy '${{ steps.deploy.outputs.deploy_id }}'             --arg ref '${{ steps.source.outputs.git_ref }}'             --arg profile '${{ steps.source.outputs.profile }}'             --arg sha '${{ steps.identity.outputs.source_sha }}'             --arg secrets '${{ steps.secret-revision.outputs.sha }}'             --arg sql '${{ steps.identity.outputs.sql_digest }}'             --arg supabase '${{ steps.backend.outputs.supabase_url }}'             --arg kind "$kind"             --argjson protected "$protected"             --arg created "$created_at"             --arg updated "$(date -u +%FT%TZ)"             '{version:2,slug:$slug,hostname:$hostname,originHostname:$origin,netlifySiteId:$site,deployId:$deploy,gitRef:$ref,profile:$profile,commitSha:$sha,secretsSha:$secrets,sqlDigest:$sql,supabaseUrl:$supabase,kind:$kind,protected:$protected,createdAt:$created,updatedAt:$updated}'             > route-next.json
+          jq -n             --arg slug "$SLUG"             --arg hostname "$SLUG.dev.statstrade.io"             --arg origin "$origin_hostname"             --arg site '${{ steps.deploy.outputs.site_id }}'             --arg deploy '${{ steps.deploy.outputs.deploy_id }}'             --arg ref '${{ steps.source.outputs.git_ref }}'             --arg profile '${{ steps.source.outputs.profile }}'             --arg sha '${{ steps.identity.outputs.source_sha }}'             --arg secrets '${{ steps.secret-revision.outputs.sha }}'             --arg sql '${{ steps.backend.outputs.sql_digest }}'             --arg supabase '${{ steps.backend.outputs.supabase_url }}'             --arg kind "$kind"             --argjson protected "$protected"             --arg created "$created_at"             --arg updated "$(date -u +%FT%TZ)"             '{version:2,slug:$slug,hostname:$hostname,originHostname:$origin,netlifySiteId:$site,deployId:$deploy,gitRef:$ref,profile:$profile,commitSha:$sha,secretsSha:$secrets,sqlDigest:$sql,supabaseUrl:$supabase,kind:$kind,protected:$protected,createdAt:$created,updatedAt:$updated}'             > route-next.json
           node control/.github/scripts/dev-environment-state.mjs route-put route-next.json
 
       - name: Create testing release manifest
         if: inputs.action != 'delete' && inputs.slug == 'testing'
         run: |
-          jq -n             --arg release_id "${{ github.run_id }}-${{ github.run_attempt }}"             --arg source_sha "${{ steps.identity.outputs.source_sha }}"             --arg secrets_sha "${{ steps.secret-revision.outputs.sha }}"             --arg sql_digest "${{ steps.identity.outputs.sql_digest }}"             --arg netlify_deploy_id "${{ steps.deploy.outputs.deploy_id }}"             --arg hostname "$SLUG.dev.statstrade.io"             --arg created_at "$(date -u +%FT%TZ)"             '{version:1,environment:"testing",releaseId:$release_id,sourceSha:$source_sha,secretsSha:$secrets_sha,sqlDigest:$sql_digest,netlifyDeployId:$netlify_deploy_id,hostname:$hostname,testingPassed:true,createdAt:$created_at}'             > testing-release.json
+          jq -n             --arg release_id "${{ github.run_id }}-${{ github.run_attempt }}"             --arg source_sha "${{ steps.identity.outputs.source_sha }}"             --arg secrets_sha "${{ steps.secret-revision.outputs.sha }}"             --arg sql_digest "${{ steps.backend.outputs.sql_digest }}"             --arg netlify_deploy_id "${{ steps.deploy.outputs.deploy_id }}"             --arg hostname "$SLUG.dev.statstrade.io"             --arg created_at "$(date -u +%FT%TZ)"             '{version:1,environment:"testing",releaseId:$release_id,sourceSha:$source_sha,secretsSha:$secrets_sha,sqlDigest:$sql_digest,netlifyDeployId:$netlify_deploy_id,hostname:$hostname,testingPassed:true,createdAt:$created_at}'             > testing-release.json
 
       - name: Publish testing release manifest
         if: inputs.action != 'delete' && inputs.slug == 'testing'
@@ -444,7 +428,6 @@ jobs:
           CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
         run: |
           node control/.github/scripts/dev-environment-state.mjs route-delete "$SLUG.dev.statstrade.io"
-          node control/.github/scripts/dev-environment-state.mjs dns-delete "$SLUG.supabase.statstrade.io"
 
       - name: Delete Netlify site and Supabase stack
         if: inputs.action == 'delete'
@@ -496,7 +479,7 @@ jobs:
           jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:"failed",message:"Lifecycle operation failed; inspect the workflow log.",workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation-failed.json
           node control/.github/scripts/dev-environment-state.mjs op-put operation-failed.json
 
-      - name: Remove staged deployment SQL
+      - name: Remove staged deployment files
         if: always() && inputs.action != 'delete'
         continue-on-error: true
         shell: bash
