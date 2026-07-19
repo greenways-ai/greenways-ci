@@ -59,7 +59,8 @@ jobs:
           test -f main/.netlify/static/docs/index.html
           test -d main/.netlify/static/_next/static
           test -f main/.netlify/functions/manifest.json
-          test -f main/.netlify/functions/identity.zip
+          test -f main/.netlify/functions/identity-login.zip
+          test -f main/.netlify/functions/identity-signup.zip
           test -f main/.netlify/functions/___netlify-server-handler.zip
       - if: always()
         uses: actions/upload-artifact@v4
