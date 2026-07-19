@@ -61,6 +61,7 @@ jobs:
           docker pull "$CI_IMAGE"
           docker run --rm --network host -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd foundation-base && lein install'
           docker run --rm --network host -e KIND -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'cd v2 && make deps-checkouts && cd backend && lein run -m "gwbuild.build-$KIND"'
+          sudo chown -R "$(id -u):$(id -g)" v2/backend/.build
       - name: Check emitted JavaScript
         id: js
         if: steps.generate.outcome == 'success' && inputs.kind == 'js'
