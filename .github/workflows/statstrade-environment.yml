@@ -13,7 +13,7 @@ on:
       secrets_ref: {required: true, type: string}
     secrets:
       GH_TOKEN: {required: true}
-      DOT_SECRETS_SSH_KEY: {required: true}
+      DOT_SECRETS_DEPLOY_KEY_B64: {required: true}
   workflow_dispatch:
     inputs:
       action:
@@ -49,7 +49,7 @@ on:
         required: false
         type: string
       secrets_ref:
-        description: Branch, tag, or commit in statstrade-dev/dot-secrets
+        description: Branch, tag, or commit in greenways-ai/dot-secrets
         required: true
         default: main
         type: string
@@ -116,14 +116,17 @@ jobs:
       - name: Configure dot-secrets deploy key
         shell: bash
         env:
-          DOT_SECRETS_SSH_KEY: ${{ secrets.DOT_SECRETS_SSH_KEY }}
+          DOT_SECRETS_DEPLOY_KEY_B64: ${{ secrets.DOT_SECRETS_DEPLOY_KEY_B64 }}
         run: |
           set -euo pipefail
           key="$RUNNER_TEMP/dot-secrets-key"
           known_hosts="$RUNNER_TEMP/dot-secrets-known-hosts"
           install -m 600 /dev/null "$key"
-          printf '%s\n' "$DOT_SECRETS_SSH_KEY" > "$key"
-          ssh-keyscan -H github.com > "$known_hosts"
+          printf '%s' "$DOT_SECRETS_DEPLOY_KEY_B64" | base64 --decode > "$key"
+          ssh-keygen -y -f "$key" > /dev/null
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "$known_hosts"
           echo "DOT_SECRETS_GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
 
       - name: Check out pinned deployment secrets
@@ -133,7 +136,7 @@ jobs:
           set -euo pipefail
           directory="$RUNNER_TEMP/dot-secrets"
           git init -q "$directory"
-          git -C "$directory" remote add origin git@github.com:statstrade-dev/dot-secrets.git
+          git -C "$directory" remote add origin git@github.com:greenways-ai/dot-secrets.git
           GIT_SSH_COMMAND="$DOT_SECRETS_GIT_SSH_COMMAND" git -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
           git -C "$directory" checkout -q --detach FETCH_HEAD
           echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -150,6 +153,24 @@ jobs:
           node ci/.github/scripts/load-env-files.mjs \
             "$secrets_directory" \
             ci/.github/config/statstrade-development-secrets.json
+
+      - name: Reject duplicate create
+        if: inputs.action == 'create'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+        run: |
+          set -euo pipefail
+          if node control/.github/scripts/dev-environment-state.mjs \
+              route-get "$SLUG.dev.statstrade.io" existing-create.json; then
+            echo "Environment $SLUG already exists." >&2
+            exit 2
+          else
+            status=$?
+            [[ "$status" == 4 ]] || exit "$status"
+          fi
 
       - name: Record queued operation
         shell: bash
@@ -243,22 +264,38 @@ jobs:
         env:
           DEV_SERVER_HOST: ${{ steps.provider-secrets.outputs.DEV_SERVER_HOST }}
           DEV_SERVER_USER_VALUE: ${{ steps.provider-secrets.outputs.DEV_SERVER_USER }}
-          DEV_SERVER_SSH_KEY: ${{ steps.provider-secrets.outputs.DEV_SERVER_SSH_KEY }}
+          DEV_SERVER_SSH_KEY_B64: ${{ steps.provider-secrets.outputs.DEV_SERVER_SSH_KEY_B64 }}
+          DEV_SERVER_SSH_HOST_KEY: ${{ steps.provider-secrets.outputs.DEV_SERVER_SSH_HOST_KEY }}
         run: |
           set -euo pipefail
-          echo "DEV_SERVER_USER=${DEV_SERVER_USER_VALUE:-root}" >> "$GITHUB_ENV"
+          echo "DEV_SERVER_USER=${DEV_SERVER_USER_VALUE:-statstrade-deploy}" >> "$GITHUB_ENV"
           install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$DEV_SERVER_SSH_KEY" > "$HOME/.ssh/statstrade-deploy"
-          chmod 600 "$HOME/.ssh/statstrade-deploy"
-          ssh-keyscan -H "$DEV_SERVER_HOST" >> "$HOME/.ssh/known_hosts"
+          install -m 600 /dev/null "$HOME/.ssh/statstrade-deploy"
+          printf '%s' "$DEV_SERVER_SSH_KEY_B64" | base64 --decode > "$HOME/.ssh/statstrade-deploy"
+          ssh-keygen -y -f "$HOME/.ssh/statstrade-deploy" > /dev/null
+          [[ "$DEV_SERVER_SSH_HOST_KEY" == "$DEV_SERVER_HOST "* ]]
+          printf '%s\n' "$DEV_SERVER_SSH_HOST_KEY" > "$HOME/.ssh/known_hosts"
+          {
+            echo "Host $DEV_SERVER_HOST"
+            echo "  UserKnownHostsFile $HOME/.ssh/known_hosts"
+            echo "  StrictHostKeyChecking yes"
+            echo "  IdentitiesOnly yes"
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config" "$HOME/.ssh/known_hosts"
           echo "DEV_SERVER_HOST=$DEV_SERVER_HOST" >> "$GITHUB_ENV"
 
       - name: Install trusted server lifecycle script
         shell: bash
         run: |
           set -euo pipefail
-          scp -i "$HOME/.ssh/statstrade-deploy"             control/ops/dev-environments/server/environment.sh             "$DEV_SERVER_USER@$DEV_SERVER_HOST:/tmp/statstrade-environment.sh"
-          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"             'install -D -m 700 /tmp/statstrade-environment.sh /opt/statstrade/bin/environment'
+          remote_dir="/home/$DEV_SERVER_USER/staging/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
+          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+            "install -d -m 700 '$remote_dir'"
+          scp -i "$HOME/.ssh/statstrade-deploy" \
+            control/ops/dev-environments/server/environment.sh \
+            "$DEV_SERVER_USER@$DEV_SERVER_HOST:$remote_dir/environment.sh"
+          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
+            "sudo -n /usr/local/sbin/statstrade-deploy install-script '$remote_dir/environment.sh'"
 
       - name: Create backend DNS
         if: inputs.action == 'create'
@@ -274,7 +311,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          remote_dir="/tmp/statstrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
+          remote_dir="/home/$DEV_SERVER_USER/staging/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
           ssh -i "$HOME/.ssh/statstrade-deploy" \
             "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
             "install -d -m 700 '$remote_dir'"
@@ -284,17 +321,17 @@ jobs:
           if [[ "$ACTION" == create ]]; then
             ssh -i "$HOME/.ssh/statstrade-deploy" \
               "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
-              "/opt/statstrade/bin/environment create '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir/bootstrap.sql'" \
+              "sudo -n /usr/local/sbin/statstrade-deploy environment create '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir/bootstrap.sql'" \
               > backend-before-migrations.json
           else
             ssh -i "$HOME/.ssh/statstrade-deploy" \
               "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
-              "/opt/statstrade/bin/environment status '$SLUG' '${{ steps.source.outputs.profile }}'" \
+              "sudo -n /usr/local/sbin/statstrade-deploy environment status '$SLUG' '${{ steps.source.outputs.profile }}'" \
               > backend-before-migrations.json
           fi
           ssh -i "$HOME/.ssh/statstrade-deploy" \
             "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
-            "/opt/statstrade/bin/environment migrate '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir' '${{ steps.identity.outputs.sql_digest }}'" \
+            "sudo -n /usr/local/sbin/statstrade-deploy environment migrate '$SLUG' '${{ steps.source.outputs.profile }}' '$remote_dir' '${{ steps.identity.outputs.sql_digest }}'" \
             > backend.json
           anon_key="$(jq -r .anonKey backend.json)"
           echo "::add-mask::$anon_key"
@@ -416,7 +453,7 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail-with-body --silent --show-error -X DELETE             -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"             "https://api.netlify.com/api/v1/sites/${{ steps.existing.outputs.site_id }}"
-          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"             "/opt/statstrade/bin/environment delete '$SLUG' '${{ steps.existing.outputs.profile }}'"
+          ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"             "sudo -n /usr/local/sbin/statstrade-deploy environment delete '$SLUG' '${{ steps.existing.outputs.profile }}'"
 
       - name: Record successful operation
         if: success()
@@ -445,7 +482,7 @@ jobs:
             curl --silent --show-error -X DELETE               -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"               "https://api.netlify.com/api/v1/sites/$CREATED_SITE_ID" || true
           fi
           if [[ -n "${DEV_SERVER_HOST:-}" ]]; then
-            ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"               "/opt/statstrade/bin/environment delete '$SLUG' '$PROFILE'" || true
+            ssh -i "$HOME/.ssh/statstrade-deploy" "$DEV_SERVER_USER@$DEV_SERVER_HOST"               "sudo -n /usr/local/sbin/statstrade-deploy environment delete '$SLUG' '$PROFILE'" || true
           fi
 
       - name: Record failed operation
@@ -464,7 +501,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          remote_dir="/tmp/statstrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
+          remote_dir="/home/$DEV_SERVER_USER/staging/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SLUG"
           if [[ -n "${DEV_SERVER_HOST:-}" && -f "$HOME/.ssh/statstrade-deploy" ]]; then
             ssh -i "$HOME/.ssh/statstrade-deploy" \
               "$DEV_SERVER_USER@$DEV_SERVER_HOST" \
