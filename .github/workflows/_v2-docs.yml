@@ -33,7 +33,7 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
       - name: Build business-plan PDFs
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         run: |
           docs/business-plan/install-deps.sh
           make -C docs/business-plan publish
@@ -112,7 +112,7 @@ jobs:
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
       - name: Build Netlify deployment
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
