@@ -28,8 +28,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: yarn
-          cache-dependency-path: v2/main/yarn.lock
       - run: corepack enable
       - name: Validate frontend workspace
         id: validate

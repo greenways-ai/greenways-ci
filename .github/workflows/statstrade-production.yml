@@ -1,0 +1,187 @@
+name: Promote Statstrade V2 frontend to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact V2 main SHA already deployed to next.statstrade.io
+        required: true
+        type: string
+      source_run_id:
+        description: Greenways CI run containing the immutable frontend artifact
+        required: true
+        type: string
+      secrets_ref:
+        description: Exact statstrade-dev/dot-secrets ref
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: statstrade-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: statstrade-production
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SECRETS_REF: ${{ inputs.secrets_ref }}
+    steps:
+      - name: Check out trusted orchestration
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Check out exact V2 source
+        uses: actions/checkout@v4
+        with:
+          repository: greenways-ai/v2
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Verify source is an exact main commit
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+
+      - name: Download immutable next artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: statstrade-frontend-${{ inputs.source_sha }}
+          path: release
+          github-token: ${{ secrets.GH_TOKEN }}
+          repository: greenways-ai/greenways-ci
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Validate release identity and digest
+        run: |
+          set -euo pipefail
+          test "$(jq -r .version release/frontend-release.json)" = 1
+          test "$(jq -r .channel release/frontend-release.json)" = next
+          test "$(jq -r .sourceSha release/frontend-release.json)" = "$SOURCE_SHA"
+          test "$(jq -r .runId release/frontend-release.json)" = "$SOURCE_RUN_ID"
+          expected="$(jq -r .artifactSha256 release/frontend-release.json)"
+          actual="$(sha256sum release/statstrade-frontend.tgz | cut -d' ' -f1)"
+          test "$actual" = "$expected"
+
+      - name: Configure dot-secrets deploy key
+        env:
+          DOT_SECRETS_SSH_KEY: ${{ secrets.DOT_SECRETS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/dot-secrets-key"
+          known_hosts="$RUNNER_TEMP/dot-secrets-known-hosts"
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$DOT_SECRETS_SSH_KEY" > "$key"
+          ssh-keyscan -H github.com > "$known_hosts"
+          echo "DOT_SECRETS_GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      - name: Check out pinned frontend configuration
+        id: secret-revision
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/dot-secrets"
+          git init -q "$directory"
+          git -C "$directory" remote add origin git@github.com:statstrade-dev/dot-secrets.git
+          GIT_SSH_COMMAND="$DOT_SECRETS_GIT_SSH_COMMAND" git -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
+          git -C "$directory" checkout -q --detach FETCH_HEAD
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Load allowlisted frontend provider configuration
+        id: provider-secrets
+        run: |
+          node ci/.github/scripts/load-env-files.mjs \
+            "${{ steps.secret-revision.outputs.directory }}/v2/statstrade/frontend" \
+            ci/.github/config/statstrade-frontend-secrets.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Restore immutable build
+        working-directory: source
+        run: tar -xzf "$GITHUB_WORKSPACE/release/statstrade-frontend.tgz"
+
+      - name: Deploy exact build to www
+        id: deploy
+        working-directory: source
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_WWW_SITE_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
+            --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --message "V2 production $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
+          echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
+          echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test unpublished production deploy
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 20 "$DEPLOY_URL" > /dev/null
+
+      - name: Advance protected prod branch to deployed SHA
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const owner = 'greenways-ai';
+            const repo = 'v2';
+            const sha = process.env.SOURCE_SHA;
+            try {
+              const current = await github.rest.git.getRef({owner, repo, ref: 'heads/prod'});
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({owner, repo, basehead: `${current.data.object.sha}...${sha}`});
+              if (!['ahead', 'identical'].includes(comparison.data.status)) {
+                core.setFailed('prod can only advance to a descendant of its current SHA.');
+                return;
+              }
+              await github.rest.git.updateRef({owner, repo, ref: 'heads/prod', sha, force: false});
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({owner, repo, ref: 'refs/heads/prod', sha});
+            }
+
+      - name: Write production manifest
+        env:
+          DEPLOY_ID: ${{ steps.deploy.outputs.id }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_WWW_SITE_ID }}
+          SECRETS_SHA: ${{ steps.secret-revision.outputs.sha }}
+        run: |
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceRunId "$SOURCE_RUN_ID" \
+            --arg artifactSha256 "$(jq -r .artifactSha256 release/frontend-release.json)" \
+            --arg nextDeployId "$(jq -r .netlifyDeployId release/frontend-release.json)" \
+            --arg productionDeployId "$DEPLOY_ID" \
+            --arg netlifySiteId "$NETLIFY_SITE_ID" \
+            --arg deployUrl "$DEPLOY_URL" \
+            --arg secretsSha "$SECRETS_SHA" \
+            --arg createdAt "$(date -u +%FT%TZ)" \
+            '{version:1,channel:"production",hostname:"www.statstrade.io",sourceSha:$sourceSha,sourceRunId:$sourceRunId,artifactSha256:$artifactSha256,nextDeployId:$nextDeployId,productionDeployId:$productionDeployId,netlifySiteId:$netlifySiteId,deployUrl:$deployUrl,secretsSha:$secretsSha,createdAt:$createdAt}' \
+            > "$RUNNER_TEMP/production-release.json"
+
+      - name: Retain production manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: statstrade-production-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/production-release.json
+          if-no-files-found: error
+          retention-days: 90

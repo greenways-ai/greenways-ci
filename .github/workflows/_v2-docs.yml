@@ -46,19 +46,19 @@ jobs:
         continue-on-error: true
         working-directory: v2/main
         run: |
-          yarn workspace @statstrade/web build:portal
-          test -f apps/statstrade/public/docs/index.html
-          test -d apps/statstrade/public/docs/assets/js
-          test -d apps/statstrade/public/docs/assets/css
-          test -f apps/statstrade/.next/BUILD_ID
+          yarn workspace @statstrade/build-portal build
+          test -f apps/statstrade-build/public/docs/index.html
+          test -d apps/statstrade-build/public/docs/assets/js
+          test -d apps/statstrade-build/public/docs/assets/css
+          test -f apps/statstrade-build/.next/BUILD_ID
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v2-build-portal-${{ github.run_id }}
           path: |
-            v2/main/apps/statstrade/public/docs
-            v2/main/apps/statstrade/.next/BUILD_ID
-            v2/main/apps/statstrade/.next/build-manifest.json
+            v2/main/apps/statstrade-build/public/docs
+            v2/main/apps/statstrade-build/.next/BUILD_ID
+            v2/main/apps/statstrade-build/.next/build-manifest.json
           if-no-files-found: warn
           retention-days: 14
       - if: always() && inputs.report_status
@@ -102,20 +102,22 @@ jobs:
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
       - name: Build Netlify deployment
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: npx --yes netlify-cli@26.2.0 build
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-          DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
-          deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
+          deploy_args=()
+          if [[ "$PUBLISH" == "true" ]]; then deploy_args+=(--prod); fi
+          deploy_output=$(npx --yes netlify-cli@26.2.0 deploy "${deploy_args[@]}" \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)

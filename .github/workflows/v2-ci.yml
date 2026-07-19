@@ -147,6 +147,29 @@ jobs:
       deploy_preview: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number != null) || (github.event_name == 'workflow_dispatch' && inputs.deploy_docs_preview) || github.event_name == 'pull_request' }}
       report_status: ${{ github.event_name == 'repository_dispatch' }}
     secrets: inherit
+  main-frontend-release:
+    name: Deploy successful main frontend
+    needs:
+      - frontend
+      - docs
+      - gwlink-js
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'repository_dispatch' &&
+        github.event.client_payload.source_ref == 'main' &&
+        needs.frontend.result == 'success' &&
+        needs.docs.result == 'success' &&
+        needs.gwlink-js.result == 'success'
+      }}
+    uses: ./.github/workflows/_statstrade-frontend-main.yml
+    with:
+      correlation_id: ${{ github.event.client_payload.correlation_id }}
+      source_repository: ${{ github.event.client_payload.source_repository }}
+      source_sha: ${{ github.event.client_payload.source_sha }}
+      secrets_ref: main
+    secrets: inherit
+
   testing-release:
     name: Deploy persistent testing
     needs:
