@@ -39,6 +39,18 @@ jobs:
           path: source
           persist-credentials: false
 
+      - id: foundation
+        run: echo "sha=$(git -C source ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned foundation source
+        uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          ref: ${{ steps.foundation.outputs.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: source/ref/foundation
+          persist-credentials: false
+
       - name: Verify exact main identity
         working-directory: source
         run: |
@@ -77,6 +89,23 @@ jobs:
           node ci/.github/scripts/load-env-files.mjs \
             "${{ steps.secret-revision.outputs.directory }}/v2/statstrade/frontend" \
             ci/.github/config/statstrade-frontend-secrets.json
+
+      - name: Resolve exact next Netlify site
+        id: next-site
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            https://api.netlify.com/api/v1/sites/next-statstrade-io \
+            > "$RUNNER_TEMP/next-site.json"
+          test "$(jq -r .name "$RUNNER_TEMP/next-site.json")" = next-statstrade-io
+          if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
+            test "$(jq -r .account_slug "$RUNNER_TEMP/next-site.json")" = "$NETLIFY_ACCOUNT_SLUG"
+          fi
+          echo "id=$(jq -r .id "$RUNNER_TEMP/next-site.json")" >> "$GITHUB_OUTPUT"
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -84,20 +113,28 @@ jobs:
 
       - name: Build immutable Netlify output
         working-directory: source
+        env:
+          DEPLOY_CONTEXT: branch:main
         run: |
           set -euo pipefail
+          make deps-checkouts
           corepack enable
-          (cd ../.. && yarn install --immutable)
-          npx --yes netlify-cli@26.2.0 build --offline --context branch:main
-          test -d .netlify
+          corepack yarn --cwd main install --immutable
+          cp main/apps/statstrade/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          npx --yes netlify-cli@26.2.0 build --offline \
+            --filter @statstrade/web --context "$DEPLOY_CONTEXT"
+          test -d main/.netlify/static
+          test -f main/.netlify/functions/manifest.json
+          test -f main/.netlify/functions/___netlify-server-handler.zip
 
       - name: Package immutable build
         id: artifact
-        working-directory: source/main/apps/statstrade
+        working-directory: source
         run: |
           set -euo pipefail
           tar -czf "$RUNNER_TEMP/statstrade-frontend.tgz" \
-            main/apps/statstrade/.netlify main/apps/statstrade/netlify.toml main/apps/statstrade/.next
+            main/.netlify main/apps/statstrade/netlify.toml
           digest="$(sha256sum "$RUNNER_TEMP/statstrade-frontend.tgz" | cut -d' ' -f1)"
           echo "sha256=$digest" >> "$GITHUB_OUTPUT"
 
@@ -106,11 +143,12 @@ jobs:
         working-directory: source
         env:
           NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_NEXT_SITE_ID }}
+          NETLIFY_SITE_ID: ${{ steps.next-site.outputs.id }}
         run: |
           set -euo pipefail
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --dir main/.netlify/static --functions main/.netlify/functions \
             --message "V2 main $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
           echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
           echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
@@ -125,7 +163,7 @@ jobs:
           ARTIFACT_SHA256: ${{ steps.artifact.outputs.sha256 }}
           DEPLOY_ID: ${{ steps.deploy.outputs.id }}
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
-          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_NEXT_SITE_ID }}
+          NETLIFY_SITE_ID: ${{ steps.next-site.outputs.id }}
           SECRETS_SHA: ${{ steps.secret-revision.outputs.sha }}
         run: |
           jq -n \

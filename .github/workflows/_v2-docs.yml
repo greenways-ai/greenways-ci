@@ -30,6 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Enable Corepack
+        run: corepack enable
       - name: Build business-plan PDFs
         working-directory: v2
         run: |
@@ -41,16 +43,25 @@ jobs:
           test -f docs-gen/static/documents/business-plan/case-studies/city2surf-organisers.pdf
           test -f docs-gen/static/documents/business-plan/case-studies/australian-red-cross-community-readiness.pdf
           test -f docs-gen/static/documents/business-plan/case-studies/reckless-ben-bricks-and-minifigs-accountability.pdf
-      - name: Build documentation
+      - name: Install frontend dependencies
+        working-directory: v2/main
+        run: corepack yarn install --immutable
+      - name: Build documentation and portal
         id: build
         continue-on-error: true
-        working-directory: v2/main
+        working-directory: v2
+        env:
+          DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
         run: |
-          yarn workspace @statstrade/build-portal build
-          test -f apps/statstrade-build/public/docs/index.html
-          test -d apps/statstrade-build/public/docs/assets/js
-          test -d apps/statstrade-build/public/docs/assets/css
-          test -f apps/statstrade-build/.next/BUILD_ID
+          cp main/apps/statstrade-build/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          npx --yes netlify-cli@26.2.0 build --offline --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT"
+          test -f main/.netlify/static/docs/index.html
+          test -d main/.netlify/static/_next/static
+          test -f main/.netlify/functions/manifest.json
+          test -f main/.netlify/functions/identity-login.zip
+          test -f main/.netlify/functions/identity-signup.zip
+          test -f main/.netlify/functions/___netlify-server-handler.zip
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -61,6 +72,14 @@ jobs:
             v2/main/apps/statstrade-build/.next/build-manifest.json
           if-no-files-found: warn
           retention-days: 14
+      - if: steps.build.outcome == 'success' && (inputs.publish || inputs.deploy_preview)
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-build-portal-netlify-${{ github.run_id }}
+          path: v2/main/.netlify
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
       - if: always() && inputs.report_status
         uses: actions/github-script@v7
         env:
@@ -96,29 +115,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: v2-build-portal-netlify-${{ github.run_id }}
+          path: v2/main/.netlify
       - name: Validate Netlify credentials
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
-      - name: Build Netlify deployment
-        working-directory: v2/main/apps/statstrade-build
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-        run: npx --yes netlify-cli@26.2.0 build
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-          PUBLISH: ${{ inputs.publish }}
+          DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
         run: |
-          deploy_args=()
-          if [[ "$PUBLISH" == "true" ]]; then deploy_args+=(--prod); fi
-          deploy_output=$(npx --yes netlify-cli@26.2.0 deploy "${deploy_args[@]}" \
+          cp main/apps/statstrade-build/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
+            --filter @statstrade/build-portal \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --no-build \
+            --dir main/.netlify/static --functions main/.netlify/functions \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)
           printf '%s\n' "$deploy_output" | tee deploy.json
