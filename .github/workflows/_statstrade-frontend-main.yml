@@ -1,0 +1,191 @@
+name: _Statstrade V2 main frontend release
+
+on:
+  workflow_call:
+    inputs:
+      correlation_id: {required: true, type: string}
+      source_repository: {required: true, type: string}
+      source_sha: {required: true, type: string}
+      secrets_ref: {required: false, default: main, type: string}
+    secrets:
+      GH_TOKEN: {required: true}
+      DOT_SECRETS_SSH_KEY: {required: true}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy V2 main to next.statstrade.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: statstrade-next
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SECRETS_REF: ${{ inputs.secrets_ref }}
+    steps:
+      - name: Check out trusted orchestration
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Check out exact V2 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - id: foundation
+        run: echo "sha=$(git -C source ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned foundation source
+        uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          ref: ${{ steps.foundation.outputs.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: source/ref/foundation
+          persist-credentials: false
+
+      - name: Verify exact main identity
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
+
+      - name: Configure dot-secrets deploy key
+        env:
+          DOT_SECRETS_SSH_KEY: ${{ secrets.DOT_SECRETS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/dot-secrets-key"
+          known_hosts="$RUNNER_TEMP/dot-secrets-known-hosts"
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$DOT_SECRETS_SSH_KEY" > "$key"
+          ssh-keyscan -H github.com > "$known_hosts"
+          echo "DOT_SECRETS_GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      - name: Check out pinned frontend configuration
+        id: secret-revision
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/dot-secrets"
+          git init -q "$directory"
+          git -C "$directory" remote add origin git@github.com:statstrade-dev/dot-secrets.git
+          GIT_SSH_COMMAND="$DOT_SECRETS_GIT_SSH_COMMAND" git -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
+          git -C "$directory" checkout -q --detach FETCH_HEAD
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Load allowlisted frontend provider configuration
+        id: provider-secrets
+        run: |
+          node ci/.github/scripts/load-env-files.mjs \
+            "${{ steps.secret-revision.outputs.directory }}/v2/statstrade/frontend" \
+            ci/.github/config/statstrade-frontend-secrets.json
+
+      - name: Resolve exact next Netlify site
+        id: next-site
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            https://api.netlify.com/api/v1/sites/next-statstrade-io \
+            > "$RUNNER_TEMP/next-site.json"
+          test "$(jq -r .name "$RUNNER_TEMP/next-site.json")" = next-statstrade-io
+          if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
+            test "$(jq -r .account_slug "$RUNNER_TEMP/next-site.json")" = "$NETLIFY_ACCOUNT_SLUG"
+          fi
+          echo "id=$(jq -r .id "$RUNNER_TEMP/next-site.json")" >> "$GITHUB_OUTPUT"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build immutable Netlify output
+        working-directory: source
+        env:
+          DEPLOY_CONTEXT: branch:main
+        run: |
+          set -euo pipefail
+          (cd ref/foundation && ./lein install)
+          make deps-checkouts
+          corepack enable
+          corepack yarn --cwd main install --immutable
+          cp main/apps/statstrade/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          npx --yes netlify-cli@26.2.0 build --offline \
+            --filter @statstrade/web --context "$DEPLOY_CONTEXT"
+          test -d main/.netlify/static
+          test -f main/.netlify/functions/manifest.json
+          test -f main/.netlify/functions/___netlify-server-handler.zip
+
+      - name: Package immutable build
+        id: artifact
+        working-directory: source
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/statstrade-frontend.tgz" \
+            main/.netlify main/apps/statstrade/netlify.toml
+          digest="$(sha256sum "$RUNNER_TEMP/statstrade-frontend.tgz" | cut -d' ' -f1)"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy exact build to next
+        id: deploy
+        working-directory: source
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ steps.next-site.outputs.id }}
+        run: |
+          set -euo pipefail
+          npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
+            --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --dir main/.netlify/static --functions main/.netlify/functions \
+            --message "V2 main $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
+          echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
+          echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test unpublished deploy
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 20 "$DEPLOY_URL" > /dev/null
+
+      - name: Write release manifest
+        env:
+          ARTIFACT_SHA256: ${{ steps.artifact.outputs.sha256 }}
+          DEPLOY_ID: ${{ steps.deploy.outputs.id }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          NETLIFY_SITE_ID: ${{ steps.next-site.outputs.id }}
+          SECRETS_SHA: ${{ steps.secret-revision.outputs.sha }}
+        run: |
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg artifactSha256 "$ARTIFACT_SHA256" \
+            --arg netlifyDeployId "$DEPLOY_ID" \
+            --arg netlifySiteId "$NETLIFY_SITE_ID" \
+            --arg deployUrl "$DEPLOY_URL" \
+            --arg secretsSha "$SECRETS_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg createdAt "$(date -u +%FT%TZ)" \
+            '{version:1,channel:"next",hostname:"next.statstrade.io",sourceSha:$sourceSha,artifactSha256:$artifactSha256,netlifyDeployId:$netlifyDeployId,netlifySiteId:$netlifySiteId,deployUrl:$deployUrl,secretsSha:$secretsSha,runId:$runId,runAttempt:$runAttempt,createdAt:$createdAt}' \
+            > "$RUNNER_TEMP/frontend-release.json"
+
+      - name: Retain promotion artifact and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: statstrade-frontend-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/statstrade-frontend.tgz
+            ${{ runner.temp }}/frontend-release.json
+          if-no-files-found: error
+          retention-days: 90
