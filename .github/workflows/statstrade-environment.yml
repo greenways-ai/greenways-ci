@@ -378,6 +378,59 @@ jobs:
             echo "origin_url=$(jq -r '.deploy_url // .deployUrl // .url' ../deploy.json)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Configure frontend hostname
+        if: inputs.action != 'delete'
+        shell: bash
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          CLOUDFLARE_STATSTRADE_ZONE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_STATSTRADE_ZONE_ID }}
+          CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
+          SITE_ID_CREATE: ${{ steps.site.outputs.site_id }}
+          SITE_ID_EXISTING: ${{ steps.existing.outputs.site_id }}
+        run: |
+          set -euo pipefail
+          site_id="${SITE_ID_CREATE:-${SITE_ID_EXISTING:-}}"
+          hostname="$SLUG.dev.statstrade.io"
+          netlify_api="https://api.netlify.com/api/v1"
+          cloudflare_api="https://api.cloudflare.com/client/v4"
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            "$netlify_api/sites/$site_id" > netlify-site.json
+          default_domain="$(jq -r '.default_domain // (.name + ".netlify.app")' netlify-site.json)"
+          jq -nc \
+            --arg hostname "$hostname" \
+            --slurpfile site netlify-site.json \
+            '{domain_aliases: ((($site[0].domain_aliases // []) + [$hostname]) | unique)}' \
+            > netlify-domain.json
+          curl --fail-with-body --silent --show-error -X PUT \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data-binary @netlify-domain.json \
+            "$netlify_api/sites/$site_id" > /dev/null
+
+          encoded_hostname="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$hostname")"
+          records_url="$cloudflare_api/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records?name=$encoded_hostname"
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+            "$records_url" > frontend-dns-existing.json
+          jq -r '.result[] | select(.name == "'"$hostname"'" and (.type == "A" or .type == "CNAME")) | .id' \
+            frontend-dns-existing.json |
+          while IFS= read -r record_id; do
+            [[ -z "$record_id" ]] && continue
+            curl --fail-with-body --silent --show-error -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+              "$cloudflare_api/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records/$record_id" \
+              > /dev/null
+          done
+          jq -nc --arg name "$hostname" --arg target "$default_domain" \
+            '{type:"CNAME",name:$name,content:$target,proxied:false,ttl:300,comment:"Managed by build.statstrade.io"}' \
+            > frontend-dns.json
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data-binary @frontend-dns.json \
+            "$cloudflare_api/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records" > /dev/null
+
       - name: Smoke test unpublished services
         if: inputs.action != 'delete'
         env:
@@ -428,6 +481,19 @@ jobs:
           CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
         run: |
           node control/.github/scripts/dev-environment-state.mjs route-delete "$SLUG.dev.statstrade.io"
+          hostname="$SLUG.dev.statstrade.io"
+          encoded_hostname="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$hostname")"
+          records="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records?name=$encoded_hostname")"
+          jq -r '.result[] | select(.name == "'"$hostname"'" and (.type == "A" or .type == "CNAME")) | .id' <<< "$records" |
+          while IFS= read -r record_id; do
+            [[ -z "$record_id" ]] && continue
+            curl --fail-with-body --silent --show-error -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+              "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records/$record_id" \
+              > /dev/null
+          done
 
       - name: Delete Netlify site and Supabase stack
         if: inputs.action == 'delete'
@@ -460,6 +526,19 @@ jobs:
           CREATED_SITE_ID: ${{ steps.site.outputs.site_id }}
         run: |
           node control/.github/scripts/dev-environment-state.mjs route-delete "$SLUG.dev.statstrade.io" || true
+          hostname="$SLUG.dev.statstrade.io"
+          encoded_hostname="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$hostname")"
+          records="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records?name=$encoded_hostname")"
+          jq -r '.result[] | select(.name == "'"$hostname"'" and (.type == "A" or .type == "CNAME")) | .id' <<< "$records" |
+          while IFS= read -r record_id; do
+            [[ -z "$record_id" ]] && continue
+            curl --fail-with-body --silent --show-error -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_DEV_ENV_TOKEN" \
+              "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records/$record_id" \
+              > /dev/null
+          done
           node control/.github/scripts/dev-environment-state.mjs dns-delete "$SLUG.supabase.statstrade.io" || true
           if [[ -n "${CREATED_SITE_ID:-}" ]]; then
             curl --silent --show-error -X DELETE               -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN"               "https://api.netlify.com/api/v1/sites/$CREATED_SITE_ID" || true
