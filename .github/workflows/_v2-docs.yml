@@ -33,7 +33,7 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
       - name: Build business-plan PDFs
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         run: |
           docs/business-plan/install-deps.sh
           make -C docs/business-plan publish
@@ -117,19 +117,18 @@ jobs:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
-        run: npx --yes netlify-cli@26.2.0 build --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT"
+        run: npx --yes netlify-cli@26.2.0 build --context "$DEPLOY_CONTEXT"
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
-          DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
         run: |
           deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
-            --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT" --no-build \
+            --no-build \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)
           printf '%s\n' "$deploy_output" | tee deploy.json
