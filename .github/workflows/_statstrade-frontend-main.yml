@@ -106,11 +106,11 @@ jobs:
         run: |
           set -euo pipefail
           corepack enable
-          corepack yarn --cwd main/js install --immutable
+          (cd main/js && corepack yarn install --immutable)
           cp main/js/apps/statstrade/netlify.toml netlify.toml
           trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 build --offline \
-            --filter @statstrade/web --context "$DEPLOY_CONTEXT"
+            --context "$DEPLOY_CONTEXT"
           test -d .netlify/static
           test -f .netlify/functions/manifest.json
           test -f .netlify/functions/___netlify-server-handler.zip
