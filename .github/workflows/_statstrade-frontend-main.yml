@@ -117,7 +117,7 @@ jobs:
           DEPLOY_CONTEXT: branch:main
         run: |
           set -euo pipefail
-          ref/foundation/lein install
+          (cd ref/foundation && ./lein install)
           make deps-checkouts
           corepack enable
           corepack yarn --cwd main install --immutable

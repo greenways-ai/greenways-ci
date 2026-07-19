@@ -41,7 +41,7 @@ jobs:
       - name: Prepare generated frontend dependencies
         working-directory: v2
         run: |
-          ref/foundation/lein install
+          (cd ref/foundation && ./lein install)
           make deps-checkouts
       - name: Validate frontend workspace
         id: validate
