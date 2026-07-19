@@ -112,15 +112,15 @@ jobs:
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
       - name: Build Netlify deployment
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
-        run: npx --yes netlify-cli@26.2.0 build --context "$DEPLOY_CONTEXT"
+        run: npx --yes netlify-cli@26.2.0 build --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT"
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
@@ -129,7 +129,7 @@ jobs:
         run: |
           deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
-            --context "$DEPLOY_CONTEXT" --no-build \
+            --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT" --no-build \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)
           printf '%s\n' "$deploy_output" | tee deploy.json
