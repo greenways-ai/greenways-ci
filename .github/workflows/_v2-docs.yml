@@ -30,6 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Enable Corepack
+        run: corepack enable
       - name: Build business-plan PDFs
         working-directory: v2
         run: |
@@ -41,24 +43,27 @@ jobs:
           test -f docs-gen/static/documents/business-plan/case-studies/city2surf-organisers.pdf
           test -f docs-gen/static/documents/business-plan/case-studies/australian-red-cross-community-readiness.pdf
           test -f docs-gen/static/documents/business-plan/case-studies/reckless-ben-bricks-and-minifigs-accountability.pdf
-      - name: Build documentation
+      - name: Install frontend dependencies
+        working-directory: v2/main
+        run: corepack yarn install --immutable
+      - name: Build documentation and portal
         id: build
         continue-on-error: true
         working-directory: v2/main
         run: |
-          yarn workspace @statstrade/web build:portal
-          test -f apps/statstrade/public/docs/index.html
-          test -d apps/statstrade/public/docs/assets/js
-          test -d apps/statstrade/public/docs/assets/css
-          test -f apps/statstrade/.next/BUILD_ID
+          corepack yarn workspace @statstrade/build-portal build
+          test -f apps/statstrade-build/public/docs/index.html
+          test -d apps/statstrade-build/public/docs/assets/js
+          test -d apps/statstrade-build/public/docs/assets/css
+          test -f apps/statstrade-build/.next/BUILD_ID
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v2-build-portal-${{ github.run_id }}
           path: |
-            v2/main/apps/statstrade/public/docs
-            v2/main/apps/statstrade/.next/BUILD_ID
-            v2/main/apps/statstrade/.next/build-manifest.json
+            v2/main/apps/statstrade-build/public/docs
+            v2/main/apps/statstrade-build/.next/BUILD_ID
+            v2/main/apps/statstrade-build/.next/build-manifest.json
           if-no-files-found: warn
           retention-days: 14
       - if: always() && inputs.report_status
@@ -96,27 +101,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install frontend dependencies
+        working-directory: v2/main
+        run: corepack yarn install --immutable
       - name: Validate Netlify credentials
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
       - name: Build Netlify deployment
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-        run: npx --yes netlify-cli@26.2.0 build
+          DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
+        run: npx --yes netlify-cli@26.2.0 build --context "$DEPLOY_CONTEXT"
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2
+        working-directory: v2/main/apps/statstrade-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
+          DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
         run: |
           deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --context "$DEPLOY_CONTEXT" --no-build \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)
           printf '%s\n' "$deploy_output" | tee deploy.json
