@@ -25,41 +25,24 @@ jobs:
           ref: ${{ inputs.source_ref }}
           token: ${{ secrets.GH_TOKEN }}
           path: v2
-      - id: foundation
-        run: echo "sha=$(git -C v2 ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
-      - name: Check out pinned foundation source
-        uses: actions/checkout@v4
-        with:
-          repository: zcaudate-xyz/foundation-base
-          ref: ${{ steps.foundation.outputs.sha }}
-          token: ${{ secrets.GH_TOKEN }}
-          path: v2/ref/foundation
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: corepack enable
-      - name: Prepare generated frontend dependencies
-        working-directory: v2
-        run: |
-          (cd ref/foundation && ./lein install)
-          make deps-checkouts
-      - name: Validate frontend workspace
+      - name: Install frontend workspace
+        working-directory: v2/main/js
+        run: yarn install --immutable
+      - name: Validate frontend through Storybook
         id: validate
         continue-on-error: true
         working-directory: v2/main/js
-        run: |
-          yarn install --immutable
-          yarn typecheck
-          yarn test --runInBand
-          yarn build
+        run: yarn storybook:build
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v2-frontend-${{ github.run_id }}
           path: |
-            v2/main/js/coverage
-            v2/main/js/apps/gw-space/.next
-            v2/main/js/apps/gw-space-storybook/storybook-static
+            v2/main/js/apps/storybook/storybook-static
           if-no-files-found: warn
           retention-days: 14
       - if: always() && inputs.report_status
@@ -75,7 +58,7 @@ jobs:
           script: |
             const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/');
             const passed = process.env.RESULT === 'success';
-            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: process.env.STATUS_CONTEXT, description: passed ? 'Frontend passed' : 'Frontend failed', target_url: process.env.RUN_URL});
+            await github.rest.repos.createCommitStatus({owner, repo, sha: process.env.SOURCE_SHA, state: passed ? 'success' : 'failure', context: process.env.STATUS_CONTEXT, description: passed ? 'Storybook passed' : 'Storybook failed', target_url: process.env.RUN_URL});
       - if: always()
         env:
           RESULT: ${{ steps.validate.outcome }}

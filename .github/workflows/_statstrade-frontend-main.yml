@@ -39,18 +39,6 @@ jobs:
           path: source
           persist-credentials: false
 
-      - id: foundation
-        run: echo "sha=$(git -C source ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
-
-      - name: Check out pinned foundation source
-        uses: actions/checkout@v4
-        with:
-          repository: zcaudate-xyz/foundation-base
-          ref: ${{ steps.foundation.outputs.sha }}
-          token: ${{ secrets.GH_TOKEN }}
-          path: source/ref/foundation
-          persist-credentials: false
-
       - name: Verify exact main identity
         working-directory: source
         run: |
@@ -117,17 +105,15 @@ jobs:
           DEPLOY_CONTEXT: branch:main
         run: |
           set -euo pipefail
-          (cd ref/foundation && ./lein install)
-          make deps-checkouts
           corepack enable
-          corepack yarn --cwd main install --immutable
-          cp main/apps/statstrade/netlify.toml netlify.toml
+          corepack yarn --cwd main/js install --immutable
+          cp main/js/apps/statstrade/netlify.toml netlify.toml
           trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 build --offline \
             --filter @statstrade/web --context "$DEPLOY_CONTEXT"
-          test -d main/.netlify/static
-          test -f main/.netlify/functions/manifest.json
-          test -f main/.netlify/functions/___netlify-server-handler.zip
+          test -d .netlify/static
+          test -f .netlify/functions/manifest.json
+          test -f .netlify/functions/___netlify-server-handler.zip
 
       - name: Package immutable build
         id: artifact
@@ -135,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           tar -czf "$RUNNER_TEMP/statstrade-frontend.tgz" \
-            main/.netlify main/apps/statstrade/netlify.toml
+            .netlify main/js/apps/statstrade/netlify.toml
           digest="$(sha256sum "$RUNNER_TEMP/statstrade-frontend.tgz" | cut -d' ' -f1)"
           echo "sha256=$digest" >> "$GITHUB_OUTPUT"
 
@@ -149,7 +135,6 @@ jobs:
           set -euo pipefail
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
-            --dir main/.netlify/static --functions main/.netlify/functions \
             --message "V2 main $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
           echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
           echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"

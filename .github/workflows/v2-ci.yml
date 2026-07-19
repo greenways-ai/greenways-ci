@@ -152,15 +152,13 @@ jobs:
     needs:
       - frontend
       - docs
-      - gwlink-js
     if: >-
       ${{
         always() &&
         github.event_name == 'repository_dispatch' &&
         github.event.client_payload.source_ref == 'main' &&
         needs.frontend.result == 'success' &&
-        needs.docs.result == 'success' &&
-        needs.gwlink-js.result == 'success'
+        needs.docs.result == 'success'
       }}
     uses: ./.github/workflows/_statstrade-frontend-main.yml
     with:

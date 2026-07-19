@@ -45,7 +45,7 @@ trusted steps that need them. Arbitrary source builds receive the public
 environment URL and anon key but no Netlify, Cloudflare, SSH, or secrets-repo
 credentials.
 
-Successful exact-`main` frontend, generated-JavaScript, and documentation checks build once and deploy
+Successful exact-`main` Storybook and documentation checks build the frontend once, without requiring a backend build, and deploy
 the immutable frontend artifact to `next.statstrade.io`. Protected promotion
 reuses that artifact for `www.statstrade.io` and advances `prod` only after the
 production deploy passes smoke tests. Until an approved promotion, the exact
