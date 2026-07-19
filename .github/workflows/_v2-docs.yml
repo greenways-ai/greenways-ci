@@ -49,30 +49,19 @@ jobs:
       - name: Build documentation and portal
         id: build
         continue-on-error: true
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_CONTEXT: ${{ inputs.publish && 'production' || 'deploy-preview' }}
-          PREPARE_DEPLOY: ${{ inputs.publish || inputs.deploy_preview }}
         run: |
-          if [ "$PREPARE_DEPLOY" = true ]; then
-            test -n "$NETLIFY_AUTH_TOKEN"
-            test -n "$NETLIFY_SITE_ID"
-            npx --yes netlify-cli@26.2.0 build --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT"
-            test -f .netlify/static/docs/index.html
-            test -d .netlify/static/_next/static
-            test -f .netlify/functions/manifest.json
-            test -f .netlify/functions/identity-login.zip
-            test -f .netlify/functions/identity-signup.zip
-            test -f .netlify/functions/___netlify-server-handler.zip
-          else
-            corepack yarn build
-            test -f public/docs/index.html
-            test -d public/docs/assets/js
-            test -d public/docs/assets/css
-            test -f .next/BUILD_ID
-          fi
+          cp main/apps/statstrade-build/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          npx --yes netlify-cli@26.2.0 build --offline --filter @statstrade/build-portal --context "$DEPLOY_CONTEXT"
+          test -f main/.netlify/static/docs/index.html
+          test -d main/.netlify/static/_next/static
+          test -f main/.netlify/functions/manifest.json
+          test -f main/.netlify/functions/identity-login.zip
+          test -f main/.netlify/functions/identity-signup.zip
+          test -f main/.netlify/functions/___netlify-server-handler.zip
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -87,7 +76,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: v2-build-portal-netlify-${{ github.run_id }}
-          path: v2/main/apps/statstrade-build/.netlify
+          path: v2/main/.netlify
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
@@ -129,7 +118,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: v2-build-portal-netlify-${{ github.run_id }}
-          path: v2/main/apps/statstrade-build/.netlify
+          path: v2/main/.netlify
       - name: Validate Netlify credentials
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
@@ -137,17 +126,19 @@ jobs:
         run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
       - name: Deploy to Netlify
         id: netlify
-        working-directory: v2/main/apps/statstrade-build
+        working-directory: v2
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
         run: |
+          cp main/apps/statstrade-build/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
           deploy_output=$(npx --yes netlify-cli@26.2.0 deploy $DEPLOY_KIND \
             --filter @statstrade/build-portal \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
             --no-build \
-            --dir .netlify/static --functions .netlify/functions \
+            --dir main/.netlify/static --functions main/.netlify/functions \
             --message "Build Portal from ${{ inputs.source_repository }}@${{ inputs.source_ref }}" \
             --json)
           printf '%s\n' "$deploy_output" | tee deploy.json
