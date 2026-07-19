@@ -109,6 +109,25 @@ jobs:
             "${{ steps.secret-revision.outputs.directory }}/v2/statstrade/frontend" \
             ci/.github/config/statstrade-frontend-secrets.json
 
+      - name: Resolve exact www Netlify site
+        id: www-site
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
+          NETLIFY_WWW_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_WWW_SITE_ID }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            https://api.netlify.com/api/v1/sites/www-statstrade-io \
+            > "$RUNNER_TEMP/www-site.json"
+          test "$(jq -r .name "$RUNNER_TEMP/www-site.json")" = www-statstrade-io
+          test "$(jq -r .id "$RUNNER_TEMP/www-site.json")" = "$NETLIFY_WWW_SITE_ID"
+          if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
+            test "$(jq -r .account_slug "$RUNNER_TEMP/www-site.json")" = "$NETLIFY_ACCOUNT_SLUG"
+          fi
+          echo "id=$(jq -r .id "$RUNNER_TEMP/www-site.json")" >> "$GITHUB_OUTPUT"
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -123,7 +142,7 @@ jobs:
         working-directory: source
         env:
           NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_WWW_SITE_ID }}
+          NETLIFY_SITE_ID: ${{ steps.www-site.outputs.id }}
         run: |
           set -euo pipefail
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
@@ -162,7 +181,7 @@ jobs:
         env:
           DEPLOY_ID: ${{ steps.deploy.outputs.id }}
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
-          NETLIFY_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_WWW_SITE_ID }}
+          NETLIFY_SITE_ID: ${{ steps.www-site.outputs.id }}
           SECRETS_SHA: ${{ steps.secret-revision.outputs.sha }}
         run: |
           jq -n \

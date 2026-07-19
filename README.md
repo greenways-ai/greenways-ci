@@ -48,7 +48,10 @@ credentials.
 Successful exact-`main` frontend, generated-JavaScript, and documentation checks build once and deploy
 the immutable frontend artifact to `next.statstrade.io`. Protected promotion
 reuses that artifact for `www.statstrade.io` and advances `prod` only after the
-production deploy passes smoke tests.
+production deploy passes smoke tests. Until an approved promotion, the exact
+`www-statstrade-io` Netlify project continues to serve the temporary branded
+construction site; production promotion verifies that project name, account,
+and configured site ID before replacing its content.
 
 Full exact-`main` V2 CI runs also deploy the protected
 `testing.dev.statstrade.io` environment and publish a non-secret release
