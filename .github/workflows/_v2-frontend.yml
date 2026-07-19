@@ -46,7 +46,7 @@ jobs:
       - name: Validate frontend workspace
         id: validate
         continue-on-error: true
-        working-directory: v2/main
+        working-directory: v2/main/js
         run: |
           yarn install --immutable
           yarn typecheck
@@ -57,9 +57,9 @@ jobs:
         with:
           name: v2-frontend-${{ github.run_id }}
           path: |
-            v2/main/coverage
-            v2/main/apps/gw-space/.next
-            v2/main/apps/gw-space-storybook/storybook-static
+            v2/main/js/coverage
+            v2/main/js/apps/gw-space/.next
+            v2/main/js/apps/gw-space-storybook/storybook-static
           if-no-files-found: warn
           retention-days: 14
       - if: always() && inputs.report_status
