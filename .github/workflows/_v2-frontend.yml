@@ -28,6 +28,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
       - run: corepack enable
       - name: Install frontend workspace
         working-directory: v2/main/js
@@ -35,8 +39,10 @@ jobs:
       - name: Validate frontend through Storybook
         id: validate
         continue-on-error: true
-        working-directory: v2/main/js
-        run: yarn storybook:build
+        working-directory: v2
+        run: |
+          (cd backend && ./lein storybook check)
+          (cd main/js && yarn workspace @statstrade/storybook build)
       - if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -194,7 +194,7 @@ jobs:
         run: |
           set -euo pipefail
           node control/.github/scripts/dev-environment-state.mjs route-get "$SLUG.dev.statstrade.io" route.json
-          protected="$(jq -r 'if .version == 2 then .protected else .slug == "testing" end' route.json)"
+          protected="$(jq -r 'if .version >= 2 then .protected else .slug == "testing" end' route.json)"
           if [[ "$ACTION" == delete && "$protected" == true ]]; then
             echo "Protected environments cannot be deleted." >&2
             exit 2
@@ -203,7 +203,7 @@ jobs:
             echo "source_ref=$(jq -r .gitRef route.json)"
             echo "profile=$(jq -r .profile route.json)"
             echo "site_id=$(jq -r .netlifySiteId route.json)"
-            echo "sql_digest=$(jq -r '.sqlDigest // empty' route.json)"
+            echo "sql_digest=$(jq -r '.sqlDigest // .backend.sqlDigest // empty' route.json)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Select source
@@ -248,6 +248,8 @@ jobs:
         run: echo "source_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Configure server SSH
+        id: server-ssh
+        continue-on-error: ${{ inputs.action != 'delete' }}
         shell: bash
         env:
           DEV_SERVER_HOST: ${{ steps.provider-secrets.outputs.DEV_SERVER_HOST }}
@@ -273,6 +275,9 @@ jobs:
           echo "DEV_SERVER_HOST=$DEV_SERVER_HOST" >> "$GITHUB_ENV"
 
       - name: Install trusted server lifecycle script
+        id: server-script
+        continue-on-error: ${{ inputs.action != 'delete' }}
+        if: inputs.action == 'delete' || steps.server-ssh.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -287,7 +292,8 @@ jobs:
 
       - name: Provision bare Supabase
         id: backend
-        if: inputs.action != 'delete'
+        if: inputs.action != 'delete' && steps.server-ssh.outcome == 'success' && steps.server-script.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -341,14 +347,31 @@ jobs:
         with:
           node-version: 22
           cache: yarn
-          cache-dependency-path: source/main/yarn.lock
+          cache-dependency-path: source/main/js/yarn.lock
+
+      - name: Set up Java for generated stories
+        if: inputs.action != 'delete'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Verify generated Storybook modules
+        if: inputs.action != 'delete'
+        working-directory: source/backend
+        run: ./lein storybook check
 
       - name: Install frontend dependencies
         if: inputs.action != 'delete'
-        working-directory: source/main
+        working-directory: source/main/js
         run: |
           corepack enable
           yarn install --immutable
+
+      - name: Build Storybook static site
+        if: inputs.action != 'delete'
+        working-directory: source/main/js
+        run: yarn workspace @statstrade/storybook build
 
       - name: Build frontend without provider credentials
         if: inputs.action != 'delete'
@@ -357,7 +380,24 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ steps.backend.outputs.supabase_url }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ steps.backend.outputs.anon_key }}
           STATSTRADE_ENVIRONMENT: ${{ inputs.slug }}
-        run: corepack yarn dlx netlify-cli@26.2.0 build
+        run: |
+          set -euo pipefail
+          cp main/js/apps/statstrade/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
+          npx --yes netlify-cli@26.2.0 build --offline
+          test -d .netlify/static
+          test -f .netlify/functions/manifest.json
+          mkdir -p .netlify/static/storybook
+          cp -R main/js/apps/storybook/storybook-static/. .netlify/static/storybook/
+          redirects="$RUNNER_TEMP/statstrade-redirects"
+          printf '/storybook /storybook/ 301!\n' > "$redirects"
+          if [[ -f .netlify/static/_redirects ]]; then
+            sed -n '1,$p' .netlify/static/_redirects >> "$redirects"
+          fi
+          cp "$redirects" .netlify/static/_redirects
+          test -f .netlify/static/storybook/index.html
+          test -f .netlify/static/storybook/index.json
+          test -f .netlify/static/storybook/iframe.html
 
       - name: Deploy prebuilt frontend
         id: deploy
@@ -371,7 +411,7 @@ jobs:
         run: |
           set -euo pipefail
           site_id="${SITE_ID_CREATE:-${SITE_ID_EXISTING:-}}"
-          corepack yarn dlx netlify-cli@26.2.0 deploy --no-build --prod             --site "$site_id" --auth "$NETLIFY_AUTH_TOKEN"             --message "Environment $SLUG from ${{ steps.identity.outputs.source_sha }}"             --json > ../deploy.json
+          npx --yes netlify-cli@26.2.0 deploy --no-build --prod             --site "$site_id" --auth "$NETLIFY_AUTH_TOKEN"             --message "Environment $SLUG from ${{ steps.identity.outputs.source_sha }}"             --json > ../deploy.json
           {
             echo "site_id=$site_id"
             echo "deploy_id=$(jq -r '.deploy_id // .deployId // .id' ../deploy.json)"
@@ -431,14 +471,28 @@ jobs:
             --data-binary @frontend-dns.json \
             "$cloudflare_api/zones/$CLOUDFLARE_STATSTRADE_ZONE_ID/dns_records" > /dev/null
 
-      - name: Smoke test unpublished services
+      - name: Smoke test unpublished frontend and Storybook
         if: inputs.action != 'delete'
+        run: |
+          set -euo pipefail
+          origin='${{ steps.deploy.outputs.origin_url }}'
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$origin" > /dev/null
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$origin/storybook/" > /dev/null
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$origin/storybook/index.json" > story-index.json
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$origin/storybook/iframe.html" > /dev/null
+          jq -e '.entries | keys | any(startswith("prediction-network-landing"))' story-index.json > /dev/null
+          jq -e '.entries | keys | any(startswith("prediction-network-onboarding"))' story-index.json > /dev/null
+
+      - name: Check backend health
+        id: backend-health
+        if: inputs.action != 'delete' && steps.backend.outcome == 'success'
+        continue-on-error: true
         env:
           ANON_KEY: ${{ steps.backend.outputs.anon_key }}
         run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --retry 5 --retry-all-errors             "${{ steps.deploy.outputs.origin_url }}" > /dev/null
-          curl --fail --silent --show-error --retry 5 --retry-all-errors             -H "apikey: $ANON_KEY"             "${{ steps.backend.outputs.supabase_url }}/auth/v1/health" > /dev/null
+          curl --fail --silent --show-error --retry 5 --retry-all-errors \
+            -H "apikey: $ANON_KEY" \
+            "${{ steps.backend.outputs.supabase_url }}/auth/v1/health" > /dev/null
 
       - name: Publish frontend route
         if: inputs.action != 'delete'
@@ -455,16 +509,23 @@ jobs:
           kind=development
           protected=false
           if [[ "$SLUG" == testing ]]; then kind=testing; protected=true; fi
-          jq -n             --arg slug "$SLUG"             --arg hostname "$SLUG.dev.statstrade.io"             --arg origin "$origin_hostname"             --arg site '${{ steps.deploy.outputs.site_id }}'             --arg deploy '${{ steps.deploy.outputs.deploy_id }}'             --arg ref '${{ steps.source.outputs.git_ref }}'             --arg profile '${{ steps.source.outputs.profile }}'             --arg sha '${{ steps.identity.outputs.source_sha }}'             --arg secrets '${{ steps.secret-revision.outputs.sha }}'             --arg sql '${{ steps.backend.outputs.sql_digest }}'             --arg supabase '${{ steps.backend.outputs.supabase_url }}'             --arg kind "$kind"             --argjson protected "$protected"             --arg created "$created_at"             --arg updated "$(date -u +%FT%TZ)"             '{version:2,slug:$slug,hostname:$hostname,originHostname:$origin,netlifySiteId:$site,deployId:$deploy,gitRef:$ref,profile:$profile,commitSha:$sha,secretsSha:$secrets,sqlDigest:$sql,supabaseUrl:$supabase,kind:$kind,protected:$protected,createdAt:$created,updatedAt:$updated}'             > route-next.json
+          if [[ '${{ steps.backend.outcome }}' != success ]]; then
+            backend='{"state":"unavailable","reason":"provisioning_failed"}'
+          elif [[ '${{ steps.backend-health.outcome }}' != success ]]; then
+            backend='{"state":"unavailable","reason":"health_check_failed"}'
+          else
+            backend="$(jq -nc --arg url '${{ steps.backend.outputs.supabase_url }}' --arg sql '${{ steps.backend.outputs.sql_digest }}' '{state:"ready",supabaseUrl:$url,sqlDigest:$sql}')"
+          fi
+          jq -n             --arg slug "$SLUG"             --arg hostname "$SLUG.dev.statstrade.io"             --arg origin "$origin_hostname"             --arg site '${{ steps.deploy.outputs.site_id }}'             --arg deploy '${{ steps.deploy.outputs.deploy_id }}'             --arg ref '${{ steps.source.outputs.git_ref }}'             --arg profile '${{ steps.source.outputs.profile }}'             --arg sha '${{ steps.identity.outputs.source_sha }}'             --arg secrets '${{ steps.secret-revision.outputs.sha }}'             --arg kind "$kind"             --argjson protected "$protected"             --argjson backend "$backend"             --arg created "$created_at"             --arg updated "$(date -u +%FT%TZ)"             '{version:3,slug:$slug,hostname:$hostname,originHostname:$origin,netlifySiteId:$site,deployId:$deploy,gitRef:$ref,profile:$profile,commitSha:$sha,secretsSha:$secrets,backend:$backend,kind:$kind,protected:$protected,createdAt:$created,updatedAt:$updated}'             > route-next.json
           node control/.github/scripts/dev-environment-state.mjs route-put route-next.json
 
       - name: Create testing release manifest
-        if: inputs.action != 'delete' && inputs.slug == 'testing'
+        if: inputs.action != 'delete' && inputs.slug == 'testing' && steps.backend.outcome == 'success' && steps.backend-health.outcome == 'success'
         run: |
           jq -n             --arg release_id "${{ github.run_id }}-${{ github.run_attempt }}"             --arg source_sha "${{ steps.identity.outputs.source_sha }}"             --arg secrets_sha "${{ steps.secret-revision.outputs.sha }}"             --arg sql_digest "${{ steps.backend.outputs.sql_digest }}"             --arg netlify_deploy_id "${{ steps.deploy.outputs.deploy_id }}"             --arg hostname "$SLUG.dev.statstrade.io"             --arg created_at "$(date -u +%FT%TZ)"             '{version:1,environment:"testing",releaseId:$release_id,sourceSha:$source_sha,secretsSha:$secrets_sha,sqlDigest:$sql_digest,netlifyDeployId:$netlify_deploy_id,hostname:$hostname,testingPassed:true,createdAt:$created_at}'             > testing-release.json
 
       - name: Publish testing release manifest
-        if: inputs.action != 'delete' && inputs.slug == 'testing'
+        if: inputs.action != 'delete' && inputs.slug == 'testing' && steps.backend.outcome == 'success' && steps.backend-health.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: statstrade-testing-release
@@ -511,7 +572,15 @@ jobs:
           CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_KV_NAMESPACE_ID }}
           CLOUDFLARE_DEV_ENV_TOKEN: ${{ steps.provider-secrets.outputs.CLOUDFLARE_DEV_ENV_TOKEN }}
         run: |
-          jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:"succeeded",message:"Lifecycle operation completed.",workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation.json
+          state=succeeded
+          message="Lifecycle operation completed."
+          if [[ "$ACTION" != delete ]] && \
+             { [[ '${{ steps.backend.outcome }}' != success ]] || [[ '${{ steps.backend-health.outcome }}' != success ]]; }; then
+            state=degraded
+            message="Frontend and Storybook deployed; backend unavailable."
+            echo "::warning::$message"
+          fi
+          jq -n             --arg id "$CORRELATION_ID" --arg action "$ACTION" --arg slug "$SLUG"             --arg state "$state" --arg message "$message"             --arg now "$(date -u +%FT%TZ)"             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             '{version:1,correlationId:$id,action:$action,slug:$slug,state:$state,message:$message,workflowUrl:$url,createdAt:$now,updatedAt:$now}'             > operation.json
           node control/.github/scripts/dev-environment-state.mjs op-put operation.json
 
       - name: Roll back incomplete create
