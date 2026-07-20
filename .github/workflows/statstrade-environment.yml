@@ -388,7 +388,7 @@ jobs:
           test -d .netlify/static
           test -f .netlify/functions/manifest.json
           mkdir -p .netlify/static/storybook
-          cp -R main/js/apps/storybook/storybook-static/. .netlify/static/storybook/
+          cp -R main/js/apps/statstrade-storybook/storybook-static/. .netlify/static/storybook/
           redirects="$RUNNER_TEMP/statstrade-redirects"
           printf '/storybook /storybook/ 301!\n' > "$redirects"
           if [[ -f .netlify/static/_redirects ]]; then

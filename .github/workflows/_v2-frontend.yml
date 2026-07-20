@@ -48,7 +48,7 @@ jobs:
         with:
           name: v2-frontend-${{ github.run_id }}
           path: |
-            v2/main/js/apps/storybook/storybook-static
+            v2/main/js/apps/statstrade-storybook/storybook-static
           if-no-files-found: warn
           retention-days: 14
       - if: always() && inputs.report_status
