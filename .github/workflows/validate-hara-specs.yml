@@ -3,6 +3,9 @@ name: Validate Hara specs service revision
 on:
   push:
     branches: [agent/validate-hara-specs]
+  pull_request:
+    paths:
+      - ".github/workflows/validate-hara-specs.yml"
   workflow_dispatch:
 
 permissions:
