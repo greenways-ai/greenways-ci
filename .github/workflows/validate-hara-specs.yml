@@ -1,0 +1,63 @@
+name: Validate Hara specs service revision
+
+on:
+  push:
+    branches: [agent/validate-hara-specs]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-hara-specs-service
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      HARA_REGISTRY_REPOSITORY: hara-lang/hara-specs-registry
+      HARA_REGISTRY_REF: main
+      HARA_REGISTRY_INDEX_PATH: registry-index.json
+      HARA_REGISTRY_REQUIRED: "true"
+      HARA_GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara-specs
+          ref: f6369b18df9afc585dc7ad75ecae93c22bd492bf
+          path: hara-specs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install dependencies
+        working-directory: hara-specs
+        run: npm install
+      - name: Refresh and verify the canonical registry
+        working-directory: hara-specs
+        run: |
+          npm run registry:build
+          npm run registry:check
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const index = JSON.parse(fs.readFileSync("src/generated/registry.json", "utf8"));
+          if (index.source?.repository !== "hara-lang/hara-specs-registry") throw new Error("Unexpected registry repository");
+          if (!/^[0-9a-f]{40}$/.test(index.source?.ref || "")) throw new Error("Registry snapshot is not pinned to a commit");
+          if (index.summary?.specifications !== 50) throw new Error(`Expected 50 specifications, received ${index.summary?.specifications}`);
+          if (index.summary?.requirements !== 275) throw new Error(`Expected 275 requirements, received ${index.summary?.requirements}`);
+          NODE
+      - name: Run service tests
+        working-directory: hara-specs
+        run: npm test
+      - name: Build the Astro and Netlify service
+        working-directory: hara-specs
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hara-specs-validated-build
+          path: |
+            hara-specs/src/generated/registry.json
+            hara-specs/public/registry/index.json
+            hara-specs/dist
+          retention-days: 1
+          if-no-files-found: error
