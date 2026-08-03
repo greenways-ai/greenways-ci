@@ -3,9 +3,6 @@ name: Validate Hara specs service revision
 on:
   push:
     branches: [agent/validate-hara-specs]
-  pull_request:
-    paths:
-      - ".github/workflows/validate-hara-specs.yml"
   workflow_dispatch:
 
 permissions:
@@ -27,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: hara-lang/hara-specs
-          ref: 06513ac07461892c494830307d632b5039291cff
+          ref: 57152f56237ad4c21d3c9bcbb2e2faa658a9f41e
           path: hara-specs
       - uses: actions/setup-node@v4
         with:
