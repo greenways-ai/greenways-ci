@@ -14,8 +14,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  inspect:
+  announce:
     if: github.event_name == 'workflow_dispatch' || (github.event.issue.number == 15 && github.event.comment.body == '/run-domain-inspection')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Announce the trusted inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/15/comments" \
+            -f body="Domain inspection workflow started: run $GITHUB_RUN_ID." > /dev/null
+
+  inspect:
+    needs: announce
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: statstrade-next
