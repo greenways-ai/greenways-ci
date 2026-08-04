@@ -1,10 +1,8 @@
 name: Inspect Hara specs production domain
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-hara-specs-domain.yml"
+  issue_comment:
+    types: [created]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +15,7 @@ concurrency:
 
 jobs:
   inspect:
+    if: github.event_name == 'workflow_dispatch' || (github.event.issue.number == 15 && github.event.comment.body == '/run-domain-inspection')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: statstrade-next
