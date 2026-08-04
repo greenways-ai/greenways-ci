@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: repair-hara-specs-domain
@@ -59,6 +60,7 @@ jobs:
 
       - name: Inspect exact site, DNS ownership, TLS, and public routing
         env:
+          GH_TOKEN: ${{ github.token }}
           NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
           NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
           SITE_ID: 357360f1-9f52-45bf-ba0c-9330d389cc14
@@ -81,29 +83,68 @@ jobs:
             test "$(jq -r .account_slug "$RUNNER_TEMP/site.json")" = "$NETLIFY_ACCOUNT_SLUG"
           fi
 
-          echo '--- Netlify site ---'
-          jq '{id,name,account_slug,state,url,ssl_url,custom_domain,domain_aliases,force_ssl,managed_dns,ssl,deploy_url,published_deploy:(.published_deploy|if type=="object" then {id,state,url,ssl_url,published_at,commit_ref} else . end)}' "$RUNNER_TEMP/site.json"
-
-          echo '--- Site DNS ---'
-          jq '[.[] | {id,name,domain,site_id,dns_servers,errors,records:[.records[]? | select((.hostname // "") | contains("specs")) | {id,hostname,type,value,ttl,managed,site_id}]}]' "$RUNNER_TEMP/site-dns.json"
-
-          echo '--- Netlify DNS zones related to Hara ---'
-          jq '[.[] | select(((.name // "") | ascii_downcase | contains("hara")) or ((.domain // "") | ascii_downcase | contains("hara"))) | {id,name,domain,site_id,dns_servers,errors,records:[.records[]? | select((.hostname // "") | contains("specs")) | {id,hostname,type,value,ttl,managed,site_id}]}]' "$RUNNER_TEMP/zones.json"
-
-          echo '--- TLS ---'
-          jq '{state,domains,created_at,updated_at,expires_at}' "$RUNNER_TEMP/ssl.json"
+          jq '{id,name,account_slug,state,url,ssl_url,custom_domain,domain_aliases,force_ssl,managed_dns,ssl,deploy_url,published_deploy:(.published_deploy|if type=="object" then {id,state,url,ssl_url,published_at,commit_ref} else . end)}' \
+            "$RUNNER_TEMP/site.json" > "$RUNNER_TEMP/site-sanitized.json"
+          jq '[.[] | {id,name,domain,site_id,dns_servers,errors,records:[.records[]? | select((.hostname // "") | contains("specs")) | {id,hostname,type,value,ttl,managed,site_id}]}]' \
+            "$RUNNER_TEMP/site-dns.json" > "$RUNNER_TEMP/site-dns-sanitized.json"
+          jq '[.[] | select(((.name // "") | ascii_downcase | contains("hara")) or ((.domain // "") | ascii_downcase | contains("hara"))) | {id,name,domain,site_id,dns_servers,errors,records:[.records[]? | select((.hostname // "") | contains("specs")) | {id,hostname,type,value,ttl,managed,site_id}]}]' \
+            "$RUNNER_TEMP/zones.json" > "$RUNNER_TEMP/zones-sanitized.json"
+          jq '{state,domains,created_at,updated_at,expires_at}' "$RUNNER_TEMP/ssl.json" > "$RUNNER_TEMP/ssl-sanitized.json"
 
           command -v dig >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq dnsutils; }
-          echo '--- Public DNS ---'
+          : > "$RUNNER_TEMP/dns.txt"
           for host in specs.hara-lang.org specs.hara-long.org specs.testing.hara-lang.org specs-hara-lang-io.netlify.app; do
-            echo "[$host]"
-            printf 'CNAME: '; dig +short "$host" CNAME | tr '\n' ' '; echo
-            printf 'A: '; dig +short "$host" A | tr '\n' ' '; echo
-            printf 'AAAA: '; dig +short "$host" AAAA | tr '\n' ' '; echo
+            {
+              echo "[$host]"
+              printf 'CNAME: '; dig +short "$host" CNAME | tr '\n' ' '; echo
+              printf 'A: '; dig +short "$host" A | tr '\n' ' '; echo
+              printf 'AAAA: '; dig +short "$host" AAAA | tr '\n' ' '; echo
+            } >> "$RUNNER_TEMP/dns.txt"
           done
 
-          echo '--- HTTP identity ---'
+          : > "$RUNNER_TEMP/http.txt"
           for url in https://specs.hara-lang.org/ https://specs.hara-long.org/ https://specs.testing.hara-lang.org/ https://specs-hara-lang-io.netlify.app/; do
-            echo "[$url]"
-            curl --silent --show-error --location --head --max-time 20 "$url" | sed -n '1,12p' || true
+            {
+              echo "[$url]"
+              curl --silent --show-error --location --head --max-time 20 "$url" | sed -n '1,12p' || true
+            } >> "$RUNNER_TEMP/http.txt"
           done
+
+          report="$RUNNER_TEMP/report.md"
+          {
+            echo '## Sanitized production-domain inspection'
+            echo
+            echo "Run: $GITHUB_RUN_ID · secrets revision: ${{ steps.secret-revision.outputs.sha }}"
+            echo
+            echo '### Netlify site'
+            echo '```json'
+            cat "$RUNNER_TEMP/site-sanitized.json"
+            echo '```'
+            echo
+            echo '### Site DNS'
+            echo '```json'
+            cat "$RUNNER_TEMP/site-dns-sanitized.json"
+            echo '```'
+            echo
+            echo '### Accessible Hara DNS zones'
+            echo '```json'
+            cat "$RUNNER_TEMP/zones-sanitized.json"
+            echo '```'
+            echo
+            echo '### TLS'
+            echo '```json'
+            cat "$RUNNER_TEMP/ssl-sanitized.json"
+            echo '```'
+            echo
+            echo '### Public DNS'
+            echo '```text'
+            cat "$RUNNER_TEMP/dns.txt"
+            echo '```'
+            echo
+            echo '### HTTP identity'
+            echo '```text'
+            cat "$RUNNER_TEMP/http.txt"
+            echo '```'
+          } > "$report"
+
+          gh api "repos/$GITHUB_REPOSITORY/issues/15/comments" -F "body=@$report" > /dev/null
