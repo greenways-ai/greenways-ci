@@ -1,7 +1,7 @@
 name: Inspect Hara specs production domain
 
 on:
-  pull_request:
+  push:
     branches: [main]
     paths:
       - ".github/workflows/repair-hara-specs-domain.yml"
