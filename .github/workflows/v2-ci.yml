@@ -158,7 +158,7 @@ jobs:
         github.event_name == 'repository_dispatch' &&
         github.event.client_payload.source_ref == 'main' &&
         needs.frontend.result == 'success' &&
-        needs.docs.result == 'success'
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped')
       }}
     uses: ./.github/workflows/_statstrade-frontend-main.yml
     with:
