@@ -43,7 +43,7 @@ jobs:
       - name: Check out exact V2 source
         uses: actions/checkout@v4
         with:
-          repository: greenways-ai/v2
+          repository: statstrade-dev/v2
           ref: ${{ inputs.source_sha }}
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
@@ -161,7 +161,7 @@ jobs:
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           script: |
-            const owner = 'greenways-ai';
+            const owner = 'statstrade-dev';
             const repo = 'v2';
             const sha = process.env.SOURCE_SHA;
             try {
