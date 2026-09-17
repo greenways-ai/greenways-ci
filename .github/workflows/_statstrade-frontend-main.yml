@@ -205,6 +205,8 @@ jobs:
           NETLIFY_SITE_ID: ${{ steps.next-site.outputs.id }}
         run: |
           set -euo pipefail
+          cp main/js/apps/statstrade/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
             --dir .netlify/static --functions .netlify/functions \
