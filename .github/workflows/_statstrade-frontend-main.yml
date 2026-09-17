@@ -52,9 +52,11 @@ jobs:
 
       - name: Verify exact main identity
         working-directory: source
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch origin main
+          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" fetch origin main
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
 
