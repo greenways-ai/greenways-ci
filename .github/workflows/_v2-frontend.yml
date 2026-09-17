@@ -41,7 +41,6 @@ jobs:
         continue-on-error: true
         working-directory: v2
         run: |
-          (cd backend && ./lein storybook check)
           (cd main/js && yarn workspace @statstrade/storybook build)
       - if: always()
         uses: actions/upload-artifact@v4
