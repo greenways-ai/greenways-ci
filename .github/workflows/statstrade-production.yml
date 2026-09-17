@@ -1,4 +1,5 @@
 name: Promote Statstrade V2 frontend to production
+run-name: Production ${{ inputs.source_sha }} from artifact run ${{ inputs.source_run_id }}
 
 on:
   workflow_dispatch:
@@ -12,7 +13,7 @@ on:
         required: true
         type: string
       secrets_ref:
-        description: Exact statstrade-dev/dot-secrets ref
+        description: Exact or explicitly approved statstrade-dev/dot-secrets ref
         required: true
         default: main
         type: string
@@ -27,6 +28,7 @@ concurrency:
 
 jobs:
   promote:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: statstrade-production
@@ -38,7 +40,26 @@ jobs:
       - name: Check out trusted orchestration
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: ci
+          persist-credentials: false
+
+      - name: Verify source and immutable artifact eligibility
+        id: preflight
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const {verifyProductionSource} = require(`${process.env.GITHUB_WORKSPACE}/ci/.github/scripts/statstrade-production.cjs`);
+            const result = await verifyProductionSource({
+              github,
+              sourceSha: process.env.SOURCE_SHA,
+              runId: process.env.SOURCE_RUN_ID,
+              secretsRef: process.env.SECRETS_REF,
+            });
+            core.setOutput('source-main-sha', result.mainSha);
+            core.setOutput('artifact-id', String(result.artifactId));
+            core.setOutput('source-run-attempt', result.runAttempt);
 
       - name: Check out exact V2 source
         uses: actions/checkout@v4
@@ -50,13 +71,9 @@ jobs:
           path: source
           persist-credentials: false
 
-      - name: Verify source is an exact main commit
+      - name: Verify checked-out source identity
         working-directory: source
-        run: |
-          set -euo pipefail
-          git fetch origin main
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Download immutable next artifact
         uses: actions/download-artifact@v4
@@ -68,15 +85,23 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
 
       - name: Validate release identity and digest
+        env:
+          SOURCE_RUN_ATTEMPT: ${{ steps.preflight.outputs.source-run-attempt }}
         run: |
-          set -euo pipefail
-          test "$(jq -r .version release/frontend-release.json)" = 1
-          test "$(jq -r .channel release/frontend-release.json)" = next
-          test "$(jq -r .sourceSha release/frontend-release.json)" = "$SOURCE_SHA"
-          test "$(jq -r .runId release/frontend-release.json)" = "$SOURCE_RUN_ID"
-          expected="$(jq -r .artifactSha256 release/frontend-release.json)"
-          actual="$(sha256sum release/statstrade-frontend.tgz | cut -d' ' -f1)"
-          test "$actual" = "$expected"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const {validateReleaseManifest} = require('./ci/.github/scripts/statstrade-production.cjs');
+          const manifest = JSON.parse(fs.readFileSync('release/frontend-release.json', 'utf8'));
+          const digest = crypto.createHash('sha256')
+            .update(fs.readFileSync('release/statstrade-frontend.tgz')).digest('hex');
+          validateReleaseManifest(manifest, {
+            sourceSha: process.env.SOURCE_SHA,
+            runId: process.env.SOURCE_RUN_ID,
+            runAttempt: process.env.SOURCE_RUN_ATTEMPT,
+            artifactSha256: digest,
+          });
+          NODE
 
       - name: Configure dot-secrets deploy key
         env:
@@ -145,13 +170,17 @@ jobs:
           NETLIFY_SITE_ID: ${{ steps.www-site.outputs.id }}
         run: |
           set -euo pipefail
+          # Match the next-channel deploy layout, including packaged redirects.
+          cp main/js/apps/statstrade/netlify.toml netlify.toml
+          trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --dir .netlify/static --functions .netlify/functions \
             --message "V2 production $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
           echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
           echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke-test unpublished production deploy
+      - name: Smoke-test production deploy
         env:
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
         run: curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 20 "$DEPLOY_URL" > /dev/null
@@ -183,10 +212,16 @@ jobs:
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
           NETLIFY_SITE_ID: ${{ steps.www-site.outputs.id }}
           SECRETS_SHA: ${{ steps.secret-revision.outputs.sha }}
+          SOURCE_MAIN_SHA: ${{ steps.preflight.outputs.source-main-sha }}
+          SOURCE_ARTIFACT_ID: ${{ steps.preflight.outputs.artifact-id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.preflight.outputs.source-run-attempt }}
         run: |
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
             --arg sourceRunId "$SOURCE_RUN_ID" \
+            --arg sourceMainSha "$SOURCE_MAIN_SHA" \
+            --arg sourceArtifactId "$SOURCE_ARTIFACT_ID" \
+            --arg sourceRunAttempt "$SOURCE_RUN_ATTEMPT" \
             --arg artifactSha256 "$(jq -r .artifactSha256 release/frontend-release.json)" \
             --arg nextDeployId "$(jq -r .netlifyDeployId release/frontend-release.json)" \
             --arg productionDeployId "$DEPLOY_ID" \
@@ -194,7 +229,7 @@ jobs:
             --arg deployUrl "$DEPLOY_URL" \
             --arg secretsSha "$SECRETS_SHA" \
             --arg createdAt "$(date -u +%FT%TZ)" \
-            '{version:1,channel:"production",hostname:"www.statstrade.io",sourceSha:$sourceSha,sourceRunId:$sourceRunId,artifactSha256:$artifactSha256,nextDeployId:$nextDeployId,productionDeployId:$productionDeployId,netlifySiteId:$netlifySiteId,deployUrl:$deployUrl,secretsSha:$secretsSha,createdAt:$createdAt}' \
+            '{version:1,channel:"production",hostname:"www.statstrade.io",sourceSha:$sourceSha,sourceRunId:$sourceRunId,sourceMainSha:$sourceMainSha,sourceArtifactId:$sourceArtifactId,sourceRunAttempt:$sourceRunAttempt,artifactSha256:$artifactSha256,nextDeployId:$nextDeployId,productionDeployId:$productionDeployId,netlifySiteId:$netlifySiteId,deployUrl:$deployUrl,secretsSha:$secretsSha,createdAt:$createdAt}' \
             > "$RUNNER_TEMP/production-release.json"
 
       - name: Retain production manifest
