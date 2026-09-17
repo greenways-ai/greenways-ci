@@ -163,16 +163,25 @@ jobs:
           trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 build --offline \
             --context "$DEPLOY_CONTEXT"
-          rm -rf .netlify/static .netlify/function-source .netlify/server
-          mkdir -p .netlify/static .netlify/function-source .netlify/server
+          rm -rf .netlify/static .netlify/functions
+          rm -rf main/js/apps/statstrade/.netlify/function-source
+          rm -rf main/js/apps/statstrade/.netlify/functions
+          mkdir -p .netlify/static
+          mkdir -p main/js/apps/statstrade/.netlify/function-source
+          mkdir -p main/js/apps/statstrade/.netlify/functions
           cp -R main/js/apps/statstrade/build/. .netlify/static/
-          cp -R main/js/apps/statstrade/.netlify/functions-internal/. .netlify/function-source/
-          cp -R main/js/apps/statstrade/netlify/functions/. .netlify/function-source/
-          cp -R main/js/apps/statstrade/.netlify/server/. .netlify/server/
-          cp main/js/apps/statstrade/.netlify/serverless.js .netlify/serverless.js
-          cp main/js/apps/statstrade/.netlify/shims.js .netlify/shims.js
-          npx --yes netlify-cli@26.2.0 functions:build \
-            --src .netlify/function-source --functions .netlify/functions
+          cp -R main/js/apps/statstrade/.netlify/functions-internal/. \
+            main/js/apps/statstrade/.netlify/function-source/
+          cp -R main/js/apps/statstrade/netlify/functions/. \
+            main/js/apps/statstrade/.netlify/function-source/
+          (
+            cd main/js
+            npx --yes netlify-cli@26.2.0 functions:build \
+              --filter @statstrade/web \
+              --src apps/statstrade/.netlify/function-source \
+              --functions apps/statstrade/.netlify/functions
+          )
+          cp -R main/js/apps/statstrade/.netlify/functions/. .netlify/functions/
           test -f .netlify/static/generated/gwlink-remote.js
           test -f .netlify/static/workers/gwlink-sharedworker-xtdb.js
           test -f .netlify/functions/manifest.json
