@@ -9,7 +9,6 @@ on:
       secrets_ref: {required: false, default: main, type: string}
     secrets:
       GH_TOKEN: {required: true}
-      DOT_SECRETS_SSH_KEY: {required: true}
 
 permissions:
   contents: read
@@ -59,26 +58,17 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
 
-      - name: Configure dot-secrets deploy key
-        env:
-          DOT_SECRETS_SSH_KEY: ${{ secrets.DOT_SECRETS_SSH_KEY }}
-        run: |
-          set -euo pipefail
-          key="$RUNNER_TEMP/dot-secrets-key"
-          known_hosts="$RUNNER_TEMP/dot-secrets-known-hosts"
-          install -m 600 /dev/null "$key"
-          printf '%s\n' "$DOT_SECRETS_SSH_KEY" > "$key"
-          ssh-keyscan -H github.com > "$known_hosts"
-          echo "DOT_SECRETS_GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
-
       - name: Check out pinned frontend configuration
         id: secret-revision
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           directory="$RUNNER_TEMP/dot-secrets"
           git init -q "$directory"
-          git -C "$directory" remote add origin git@github.com:statstrade-dev/dot-secrets.git
-          GIT_SSH_COMMAND="$DOT_SECRETS_GIT_SSH_COMMAND" git -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
+          git -C "$directory" remote add origin https://github.com/statstrade-dev/dot-secrets.git
+          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" \
+            -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
           git -C "$directory" checkout -q --detach FETCH_HEAD
           echo "directory=$directory" >> "$GITHUB_OUTPUT"
           echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"

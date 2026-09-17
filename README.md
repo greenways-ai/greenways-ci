@@ -39,11 +39,10 @@ plane dispatches it with a source repository and ref; the workflow resolves the
 ref to an immutable commit before building.
 
 Provider credentials are loaded from an explicit revision of
-`statstrade-dev/dot-secrets` with the repository-scoped
-`DOT_SECRETS_SSH_KEY`. The strict loader exposes allowlisted values only to the
-trusted steps that need them. Arbitrary source builds receive the public
-environment URL and anon key but no Netlify, Cloudflare, SSH, or secrets-repo
-credentials.
+`statstrade-dev/dot-secrets` with the repository-scoped `GH_TOKEN`. The strict
+loader exposes allowlisted values only to the trusted steps that need them.
+Arbitrary source builds receive the public environment URL and anon key but no
+Netlify, Cloudflare, SSH, or secrets-repo credentials.
 
 Successful exact-`main` Storybook and documentation checks build the frontend once, without requiring a backend build, and deploy
 the immutable frontend artifact to `next.statstrade.io`. Protected promotion
