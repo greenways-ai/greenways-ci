@@ -106,12 +106,14 @@ jobs:
         env:
           NETLIFY_AUTH_TOKEN: ${{ steps.provider-secrets.outputs.NETLIFY_AUTH_TOKEN }}
           NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
+          NETLIFY_NEXT_SITE_ID: ${{ steps.provider-secrets.outputs.NETLIFY_NEXT_SITE_ID }}
         run: |
           set -euo pipefail
           test -n "$NETLIFY_AUTH_TOKEN"
+          site_id="${NETLIFY_NEXT_SITE_ID:-next-statstrade-io}"
           curl --fail-with-body --silent --show-error \
             -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
-            https://api.netlify.com/api/v1/sites/next-statstrade-io \
+            "https://api.netlify.com/api/v1/sites/$site_id" \
             > "$RUNNER_TEMP/next-site.json"
           test "$(jq -r .name "$RUNNER_TEMP/next-site.json")" = next-statstrade-io
           if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
