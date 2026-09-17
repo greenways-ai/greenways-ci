@@ -54,11 +54,14 @@ jobs:
         working-directory: source
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
         run: |
           set -euo pipefail
-          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" fetch origin main
+          git fetch --no-tags \
+            "https://x-access-token:${GH_TOKEN}@github.com/${SOURCE_REPOSITORY}.git" \
+            main
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_SHA"
 
       - name: Check out pinned frontend configuration
         id: secret-revision
@@ -68,9 +71,9 @@ jobs:
           set -euo pipefail
           directory="$RUNNER_TEMP/dot-secrets"
           git init -q "$directory"
-          git -C "$directory" remote add origin https://github.com/statstrade-dev/dot-secrets.git
-          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" \
-            -C "$directory" fetch --depth=1 origin "$SECRETS_REF"
+          git -C "$directory" fetch --depth=1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/statstrade-dev/dot-secrets.git" \
+            "$SECRETS_REF"
           git -C "$directory" checkout -q --detach FETCH_HEAD
           echo "directory=$directory" >> "$GITHUB_OUTPUT"
           echo "sha=$(git -C "$directory" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
