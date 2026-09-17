@@ -98,7 +98,7 @@ jobs:
         continue-on-error: true
         run: |
           docker run --rm --network host -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" "$CI_IMAGE" bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend && lein rpc && lein link && lein sql'
-          git -C v2 diff --exit-code -- backend/src/gwdb/rpc backend/src/gwdb/core/trigger_metadata.clj backend/src/gwlink/backbone/rpc.clj backend/src/gwlink/backbone/view.clj main/sql | tee v2/backend/generated-diff.log
+          git -C v2 diff --exit-code -- backend/src/gwdb/rpc backend/src/gwdb/fn/helper/trigger_metadata.clj backend/src/gwlink/backbone/rpc.clj backend/src/gwlink/backbone/view.clj main/sql | tee v2/backend/generated-diff.log
 
       - name: Upload diagnostics
         if: always()
