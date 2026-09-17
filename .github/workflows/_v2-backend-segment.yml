@@ -90,7 +90,7 @@ jobs:
           SELECTORS: ${{ inputs.selectors }}
           TEST_LOG: ${{ inputs.artifact_suffix }}-test.log
         run: |
-          docker run --rm --network host -e SELECTORS -e TEST_LOG -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" -v /var/run/docker.sock:/var/run/docker.sock:ro "$CI_IMAGE" bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend; : > "$TEST_LOG"; for selector in $SELECTORS; do lein test :in "$selector" 2>&1 | tee -a "$TEST_LOG" || exit 1; done'
+          docker run --rm --network host -e SELECTORS -e TEST_LOG -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" -v "$HOME/.m2:/root/.m2" -v /var/run/docker.sock:/var/run/docker.sock:ro "$CI_IMAGE" bash -lc 'set -o pipefail; cd v2 && make deps-checkouts && cd backend; : > "$TEST_LOG"; for selector in $SELECTORS; do lein test :with "[$selector]" 2>&1 | tee -a "$TEST_LOG" || exit 1; done'
 
       - name: Verify generated artifacts
         id: generated
