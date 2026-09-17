@@ -109,15 +109,27 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$NETLIFY_AUTH_TOKEN"
-          curl --fail-with-body --silent --show-error \
-            -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
-            https://api.netlify.com/api/v1/sites/next-statstrade-io \
-            > "$RUNNER_TEMP/next-site.json"
-          test "$(jq -r .name "$RUNNER_TEMP/next-site.json")" = next-statstrade-io
+          sites_json="$(curl --fail-with-body --silent --show-error \
+            --header "Accept: application/json" \
+            --header "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            "https://api.netlify.com/api/v1/sites?per_page=100")"
+          site_json="$(jq -c '
+            map(select(
+              .custom_domain == "next.statstrade.io" or
+              .name == "next-statstrade-io" or
+              .subdomain == "next-statstrade-io" or
+              .ssl_url == "https://next.statstrade.io"
+            ))
+            | first // empty
+          ' <<<"$sites_json")"
+          test -n "$site_json" || {
+            echo "Netlify site for next.statstrade.io was not found" >&2
+            exit 1
+          }
           if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
-            test "$(jq -r .account_slug "$RUNNER_TEMP/next-site.json")" = "$NETLIFY_ACCOUNT_SLUG"
+            test "$(jq -r .account_slug <<<"$site_json")" = "$NETLIFY_ACCOUNT_SLUG"
           fi
-          echo "id=$(jq -r .id "$RUNNER_TEMP/next-site.json")" >> "$GITHUB_OUTPUT"
+          echo "id=$(jq -r .id <<<"$site_json")" >> "$GITHUB_OUTPUT"
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
