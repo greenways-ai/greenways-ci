@@ -1,0 +1,147 @@
+name: _V2 source gates and regeneration
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      source_base_sha:
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Namespace gates and canonical generation
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CI: 'true'
+      GW_GATE_BASE: ${{ inputs.source_base_sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_BASE_SHA: ${{ inputs.source_base_sha }}
+    steps:
+      - name: Validate exact revision inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          repository: statstrade-dev/v2
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: v2
+      - name: Verify source and resolve pinned Foundation
+        id: foundation
+        working-directory: v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git cat-file -e "$SOURCE_BASE_SHA^{commit}"
+          sha=$(git ls-tree HEAD ref/foundation | awk '{print $3}')
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          ref: ${{ steps.foundation.outputs.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: false
+          path: foundation-base
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+      - uses: actions/cache/restore@v4
+        id: maven
+        with:
+          path: ~/.m2/repository
+          key: org-toolchain-${{ runner.os }}-${{ steps.foundation.outputs.sha }}
+      - name: Install native tools and declared disposable images
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y leiningen unzip
+          mkdir -p "$RUNNER_TEMP/kondo"
+          curl --retry 3 --max-time 90 --fail --location --silent --show-error https://github.com/clj-kondo/clj-kondo/releases/download/v2026.05.25/clj-kondo-2026.05.25-linux-amd64.zip -o "$RUNNER_TEMP/kondo.zip"
+          unzip -q "$RUNNER_TEMP/kondo.zip" -d "$RUNNER_TEMP/kondo"
+          echo "$RUNNER_TEMP/kondo" >> "$GITHUB_PATH"
+          for image in public.ecr.aws/supabase/postgres:15.8.1.085 public.ecr.aws/supabase/postgrest:v14.13; do
+            for attempt in 1 2 3; do
+              if docker pull "$image"; then break; fi
+              test "$attempt" -lt 3
+              sleep $((attempt * 10))
+            done
+          done
+      - name: Install the pinned source toolchain
+        working-directory: foundation-base
+        shell: bash
+        run: |
+          set -euo pipefail
+          lein install 2>&1 | tee "$RUNNER_TEMP/source-gates-install.log"
+          cd ../v2
+          make deps-checkouts
+      - name: Run the exact gate regression namespace
+        working-directory: v2/backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          lein run -m clojure.main -e '(do (require (quote code.test)) (require (quote gwbuild.gate)) (let [result (code.test/run (quote gwbuild.gate-test))] (prn result) (shutdown-agents) (System/exit (if (gwbuild.gate.policy/summary-passed? result) 0 1))))' 2>&1 | tee "$RUNNER_TEMP/source-gates-unit.log"
+      - name: Run common, actor and build prerequisites
+        working-directory: v2/backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          lein run -m clojure.main -e '(do (require (quote code.test)) (require (quote gwbuild.gate)) (gwbuild.gate/-main "changed" "build"))' 2>&1 | tee "$RUNNER_TEMP/source-gates-build.log"
+      - name: Regenerate only through canonical owners and predecessor gates
+        working-directory: v2/backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner() {
+            lein run -m clojure.main -e "(do (require 'code.test) (require '$1) ((resolve '$1/-main)) (shutdown-agents) (System/exit 0))"
+          }
+          gate() {
+            lein run -m clojure.main -e "(do (require 'code.test) (require 'gwbuild.gate) (gwbuild.gate/-main \"changed\" \"$1\"))"
+          }
+          owner gwbuild.build-rpc 2>&1 | tee "$RUNNER_TEMP/source-gates-rpc.log"
+          gate rpc 2>&1 | tee "$RUNNER_TEMP/source-gates-rpc-tests.log"
+          owner gwbuild.build-link 2>&1 | tee "$RUNNER_TEMP/source-gates-link.log"
+          gate link 2>&1 | tee "$RUNNER_TEMP/source-gates-link-tests.log"
+          owner gwbuild.build-sql 2>&1 | tee "$RUNNER_TEMP/source-gates-sql.log"
+          owner gwbuild.tasks.generate-openapi 2>&1 | tee "$RUNNER_TEMP/source-gates-openapi.log"
+          git add -N -- src/gwdb/rpc src/gwdb/core/trigger_metadata.clj src/gwlink/backbone/rpc.clj src/gwlink/backbone/view.clj ../main/sql ../main/js/rpc-api.json
+          git diff --binary > "$RUNNER_TEMP/source-gates-first.patch"
+          owner gwbuild.build-sql
+          owner gwbuild.tasks.generate-openapi
+          git add -N -- src/gwdb/rpc src/gwdb/core/trigger_metadata.clj src/gwlink/backbone/rpc.clj src/gwlink/backbone/view.clj ../main/sql ../main/js/rpc-api.json
+          git diff --binary > "$RUNNER_TEMP/source-gates-second.patch"
+          cmp "$RUNNER_TEMP/source-gates-first.patch" "$RUNNER_TEMP/source-gates-second.patch"
+      - name: Retain diagnostics without receipts or credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-gates-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/source-gates-*.log
+            ${{ runner.temp }}/source-gates-second.patch
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: always() && steps.maven.outputs.cache-hit != 'true'
+        with:
+          path: ~/.m2/repository
+          key: org-toolchain-${{ runner.os }}-${{ steps.foundation.outputs.sha }}
