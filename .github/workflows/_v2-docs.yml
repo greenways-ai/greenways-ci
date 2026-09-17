@@ -123,13 +123,43 @@ jobs:
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-        run: test -n "$NETLIFY_AUTH_TOKEN" && test -n "$NETLIFY_SITE_ID"
+        run: |
+          test -n "$NETLIFY_AUTH_TOKEN"
+          if [[ "${{ inputs.publish }}" != "true" ]]; then
+            test -n "$NETLIFY_SITE_ID"
+          fi
+      - name: Resolve production Netlify site
+        if: inputs.publish
+        id: production-site
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          sites_json="$(curl --fail-with-body --silent --show-error \
+            --header "Accept: application/json" \
+            --header "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
+            "https://api.netlify.com/api/v1/sites?per_page=100")"
+          site_id="$(jq -r '
+            map(select(
+              .custom_domain == "build.statstrade.io" or
+              .name == "build-statstrade" or
+              .subdomain == "build-statstrade" or
+              .ssl_url == "https://build.statstrade.io"
+            ))
+            | first
+            | .id // empty
+          ' <<<"$sites_json")"
+          test -n "$site_id" || {
+            echo "Netlify site for build.statstrade.io was not found" >&2
+            exit 1
+          }
+          echo "id=$site_id" >> "$GITHUB_OUTPUT"
       - name: Deploy to Netlify
         id: netlify
         working-directory: v2
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+          NETLIFY_SITE_ID: ${{ steps.production-site.outputs.id || secrets.NETLIFY_SITE_ID }}
           DEPLOY_KIND: ${{ inputs.publish && '--prod' || '' }}
         run: |
           cp main/js/apps/statstrade-build/netlify.toml netlify.toml
