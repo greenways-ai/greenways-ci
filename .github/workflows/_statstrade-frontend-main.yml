@@ -39,6 +39,18 @@ jobs:
           path: source
           persist-credentials: false
 
+      - id: foundation
+        run: echo "sha=$(git -C source ls-tree HEAD ref/foundation | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned foundation source
+        uses: actions/checkout@v4
+        with:
+          repository: zcaudate-xyz/foundation-base
+          ref: ${{ steps.foundation.outputs.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: source/ref/foundation
+          persist-credentials: false
+
       - name: Verify exact main identity
         working-directory: source
         run: |
@@ -74,9 +86,25 @@ jobs:
       - name: Load allowlisted frontend provider configuration
         id: provider-secrets
         run: |
-          node ci/.github/scripts/load-env-files.mjs \
-            "${{ steps.secret-revision.outputs.directory }}/v2/statstrade/frontend" \
-            ci/.github/config/statstrade-frontend-secrets.json
+          set -euo pipefail
+          secrets_directory="${{ steps.secret-revision.outputs.directory }}"
+          config_directory="$RUNNER_TEMP/statstrade-next-frontend-config"
+          if [[ -d "$secrets_directory/v2/statstrade/frontend" ]]; then
+            node ci/.github/scripts/load-env-files.mjs \
+              "$secrets_directory/v2/statstrade/frontend" \
+              ci/.github/config/statstrade-next-frontend-secrets.json
+          elif [[ -f "$secrets_directory/statstrade/prod/netlify.env" ]]; then
+            install -d -m 700 "$config_directory"
+            awk -F= '
+              $1 ~ /^(NETLIFY_AUTH_TOKEN|NETLIFY_ACCOUNT_SLUG|NETLIFY_NEXT_SITE_ID|NEXT_PUBLIC_SUPABASE_URL|NEXT_PUBLIC_SUPABASE_ANON_KEY|NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY)$/ {print}
+            ' "$secrets_directory/statstrade/prod/netlify.env" > "$config_directory/netlify.env"
+            node ci/.github/scripts/load-env-files.mjs \
+              "$config_directory" \
+              ci/.github/config/statstrade-next-frontend-secrets.json
+          else
+            echo "No supported Statstrade frontend configuration found." >&2
+            exit 1
+          fi
 
       - name: Resolve exact next Netlify site
         id: next-site
@@ -85,6 +113,7 @@ jobs:
           NETLIFY_ACCOUNT_SLUG: ${{ steps.provider-secrets.outputs.NETLIFY_ACCOUNT_SLUG }}
         run: |
           set -euo pipefail
+          test -n "$NETLIFY_AUTH_TOKEN"
           curl --fail-with-body --silent --show-error \
             -H "Authorization: Bearer $NETLIFY_AUTH_TOKEN" \
             https://api.netlify.com/api/v1/sites/next-statstrade-io \
@@ -99,21 +128,48 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
       - name: Build immutable Netlify output
         working-directory: source
         env:
           DEPLOY_CONTEXT: branch:main
+          NEXT_PUBLIC_SUPABASE_URL: ${{ steps.provider-secrets.outputs.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ steps.provider-secrets.outputs.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY: ${{ steps.provider-secrets.outputs.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY }}
         run: |
           set -euo pipefail
+          if [[ -z "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]]; then
+            export NEXT_PUBLIC_SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY"
+          fi
+          test -n "$NEXT_PUBLIC_SUPABASE_URL"
+          test -n "$NEXT_PUBLIC_SUPABASE_ANON_KEY"
+          (cd ref/foundation && ./lein install)
+          make deps-checkouts
           corepack enable
           (cd main/js && corepack yarn install --immutable)
           cp main/js/apps/statstrade/netlify.toml netlify.toml
           trap 'rm -f netlify.toml' EXIT
           npx --yes netlify-cli@26.2.0 build --offline \
             --context "$DEPLOY_CONTEXT"
-          test -d .netlify/static
+          rm -rf .netlify/static .netlify/function-source .netlify/server
+          mkdir -p .netlify/static .netlify/function-source .netlify/server
+          cp -R main/js/apps/statstrade/build/. .netlify/static/
+          cp -R main/js/apps/statstrade/.netlify/functions-internal/. .netlify/function-source/
+          cp -R main/js/apps/statstrade/netlify/functions/. .netlify/function-source/
+          cp -R main/js/apps/statstrade/.netlify/server/. .netlify/server/
+          cp main/js/apps/statstrade/.netlify/serverless.js .netlify/serverless.js
+          cp main/js/apps/statstrade/.netlify/shims.js .netlify/shims.js
+          npx --yes netlify-cli@26.2.0 functions:build \
+            --src .netlify/function-source --functions .netlify/functions
+          test -f .netlify/static/generated/gwlink-remote.js
+          test -f .netlify/static/workers/gwlink-sharedworker-xtdb.js
           test -f .netlify/functions/manifest.json
-          test -f .netlify/functions/___netlify-server-handler.zip
+          test -f .netlify/functions/sveltekit-render.zip
 
       - name: Package immutable build
         id: artifact
@@ -135,6 +191,7 @@ jobs:
           set -euo pipefail
           npx --yes netlify-cli@26.2.0 deploy --no-build --prod \
             --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --dir .netlify/static --functions .netlify/functions \
             --message "V2 main $SOURCE_SHA" --json > "$RUNNER_TEMP/deploy.json"
           echo "id=$(jq -r '.deploy_id // .deployId // .id' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
           echo "url=$(jq -r '.deploy_url // .deployUrl // .url' "$RUNNER_TEMP/deploy.json")" >> "$GITHUB_OUTPUT"
