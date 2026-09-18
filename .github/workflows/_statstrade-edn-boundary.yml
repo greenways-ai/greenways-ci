@@ -1,0 +1,88 @@
+name: _Statstrade EDN boundary
+
+# This deliberately does not certify GWDB generation gates, PostgreSQL,
+# Foundation runtime behavior, product integration, or deployment.
+on:
+  workflow_call:
+    inputs:
+      source_repository: {required: true, type: string}
+      source_ref: {required: true, type: string}
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    name: EDN format and compiler (no database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate exact caller and revision
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_REPOSITORY" = "$CALLER_REPOSITORY"
+          case "$SOURCE_REPOSITORY" in
+            statstrade-dev/v2-db|statstrade-dev/v2-services) ;;
+            *) echo 'Unsupported boundary-test repository' >&2; exit 1 ;;
+          esac
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+          path: source
+
+      - name: Verify checkout identity
+        working-directory: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_ref }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: DeLaGuardo/setup-clojure@3fe9b3ae632c6758d0b7757b0838606ef4287b08 # 13.4
+        with:
+          cli: 1.11.1.1413
+
+      - uses: actions/setup-node@v4
+        if: inputs.source_repository == 'statstrade-dev/v2-services'
+        with:
+          node-version: '22'
+
+      - name: Install pinned TypeScript checker
+        if: inputs.source_repository == 'statstrade-dev/v2-services'
+        run: npm install --global typescript@5.7.3
+
+      - name: Test producer format and publication behavior
+        if: inputs.source_repository == 'statstrade-dev/v2-db'
+        working-directory: source/contract-tests
+        run: |
+          set -euo pipefail
+          clojure -M:test 2>&1 | tee ../boundary-tests.log
+
+      - name: Test isolated consumer, generated modules and declarations
+        if: inputs.source_repository == 'statstrade-dev/v2-services'
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test ! -d checkouts/foundation
+          test ! -d backend-db
+          clojure -M:test 2>&1 | tee boundary-tests.log
+
+      - name: Preserve boundary-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edn-boundary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: source/boundary-tests.log
+          if-no-files-found: warn
+          retention-days: 14
